@@ -91,6 +91,7 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `AGENT_API_BASE_URL` | `http://litellm:4000/v1` | LLM endpoint for agent (defaults to LiteLLM proxy) |
 | `AGENT_API_KEY` | | API key for agent LLM endpoint |
 | `AGENT_MAX_ITERATIONS` | `3` | Max corrective RAG retry iterations |
+| `AGENT_TOOL_PREVIEW_CHARS` | `200` | Max chars of document text sent to agent LLM for grading (full text stored separately) |
 
 ### Critical: Keeping Settings in Sync
 
@@ -104,9 +105,18 @@ The following settings **must** match your Open WebUI deployment exactly, or sea
 
 ### Linear Mode (`ENABLE_AGENTIC_RAG=false`)
 
-```
-Query → Embed → Vector Search (Qdrant) → [Hybrid Fusion] → [Reranking] → Dedup → Results
-                                              optional         optional
+```mermaid
+flowchart LR
+    A[POST /search] --> B[Embed queries]
+    B --> C[Vector search\nQdrant]
+    C --> D{Hybrid\nenabled?}
+    D -- yes --> E[BM25 search +\nRank Fusion]
+    D -- no --> F{Reranking\nenabled?}
+    E --> F
+    F -- yes --> G[Cross-encoder\nrerank]
+    F -- no --> H[Dedup + limit k]
+    G --> H
+    H --> I[Response]
 ```
 
 1. **Embed** queries using the configured embedding API
@@ -117,18 +127,52 @@ Query → Embed → Vector Search (Qdrant) → [Hybrid Fusion] → [Reranking] �
 
 ### Agentic Mode (`ENABLE_AGENTIC_RAG=true`)
 
-```
-Query → Agent (PydanticAI) → [Analyze] → [Rewrite/Decompose] → Retrieve → [Grade] → Results
-                                                                    ↑          |
-                                                                    └── retry ─┘
+```mermaid
+flowchart TD
+    A[POST /search] --> B[Extract queries\nfrom request/messages]
+    B --> C[LLM: Analyze query]
+
+    C --> D{Strategy?}
+    D -- direct --> E[Use query as-is]
+    D -- rewrite --> F[LLM: Rewrite query\nfor clarity]
+    D -- decompose --> G[LLM: Split into\n2-3 sub-queries]
+
+    E --> H[retrieve tool]
+    F --> H
+    G --> H
+
+    subgraph retrieve ["retrieve tool (PydanticAI)"]
+        H1[Embed queries] --> H2[Vector search\nQdrant]
+        H2 --> H3{Hybrid?}
+        H3 -- yes --> H4[BM25 + Rank Fusion]
+        H3 -- no --> H5{Rerank?}
+        H4 --> H5
+        H5 -- yes --> H6[Cross-encoder rerank]
+        H5 -- no --> H7[Return results]
+        H6 --> H7
+    end
+
+    H --> H1
+    H7 --> I[Store full results\nin side-channel]
+    I --> J[Send truncated previews\nto LLM]
+
+    J --> K[LLM: Grade relevance]
+    K --> L{Results\nrelevant?}
+    L -- yes --> M[Dedup + limit k]
+    L -- no --> N{Retries\n< max?}
+    N -- yes --> F
+    N -- no --> M
+
+    M --> O[Response\nfull text from side-channel]
 ```
 
 1. **Query Analysis** — LLM decides strategy: direct search, rewrite for clarity, or decompose into sub-queries
 2. **Query Rewriting** — LLM reformulates vague queries for better retrieval
 3. **Query Decomposition** — complex questions split into independent sub-queries
 4. **Retrieval** — existing pipeline (embed → vector search → optional hybrid/rerank) exposed as a PydanticAI tool
-5. **Relevance Grading** — LLM grades results; if poor, rewrites query and retries (up to `AGENT_MAX_ITERATIONS`)
-6. **Dedup** by content hash, limit to `k` results
+5. **Side-channel** — full document text stored in deps; only truncated previews (`AGENT_TOOL_PREVIEW_CHARS`) sent to the LLM to reduce token cost
+6. **Relevance Grading** — LLM grades truncated results; if poor, rewrites query and retries (up to `AGENT_MAX_ITERATIONS`)
+7. **Dedup** by content hash, limit to `k` results — response uses full text from the side-channel
 
 ### Notes
 
