@@ -92,7 +92,7 @@ and unambiguous. When decomposing, break into 2-3 independent sub-queries.\
 """
 
 
-def _build_agent() -> Agent[AgentDeps, list[RetrievalResult]]:
+def _build_agent() -> Agent[AgentDeps, str]:
     """Build the PydanticAI agent. Called once at module level."""
     model = OpenAIChatModel(
         settings.agent_model,
@@ -105,7 +105,7 @@ def _build_agent() -> Agent[AgentDeps, list[RetrievalResult]]:
         model,
         system_prompt=SYSTEM_PROMPT.format(max_iterations=settings.agent_max_iterations),
         deps_type=AgentDeps,
-        output_type=list[RetrievalResult],
+        output_type=str,
     )
 
     @agent.tool
@@ -192,10 +192,10 @@ def _build_agent() -> Agent[AgentDeps, list[RetrievalResult]]:
     return agent
 
 
-_agent: Agent[AgentDeps, list[RetrievalResult]] | None = None
+_agent: Agent[AgentDeps, str] | None = None
 
 
-def _get_agent() -> Agent[AgentDeps, list[RetrievalResult]]:
+def _get_agent() -> Agent[AgentDeps, str]:
     global _agent
     if _agent is None:
         _agent = _build_agent()
@@ -287,8 +287,8 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         model_settings={"temperature": 0},
     )
 
-    # Use full results from deps (side-channel), not the truncated agent output
-    retrieval_results = deps.full_results or result.output
+    # Use full results from deps (side-channel), not the agent's text output
+    retrieval_results = deps.full_results or []
     log.info(
         "Agentic search complete: %d result sets, usage=%s",
         len(retrieval_results) if retrieval_results else 0,
