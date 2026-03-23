@@ -54,9 +54,7 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
     all_distances: list[list[float]] = []
 
     # Step 2: search each query across all collections (concurrently)
-    for _query_idx, (query_text, query_vector) in enumerate(
-        zip(queries, vectors, strict=True)
-    ):
+    for _query_idx, (query_text, query_vector) in enumerate(zip(queries, vectors, strict=True)):
         # Vector search across all collections concurrently
         tasks = [
             qdrant.vector_search(coll, query_vector, fetch_k) for coll in request.collection_names

@@ -2,11 +2,27 @@ from unittest.mock import AsyncMock, patch
 
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
+    AgentDeps,
     RetrievalResult,
     _dedup_results,
     agentic_search,
     extract_queries_from_messages,
 )
+
+
+def _make_mock_agent(full_results: list[RetrievalResult]):
+    """Create a mock agent whose run() populates deps.full_results."""
+    mock_agent_result = AsyncMock()
+    mock_agent_result.output = "done"
+    mock_agent_result.usage.return_value = None
+
+    async def _run(prompt, *, deps: AgentDeps, **kwargs):
+        deps.full_results = full_results
+        return mock_agent_result
+
+    mock_agent = AsyncMock()
+    mock_agent.run = AsyncMock(side_effect=_run)
+    return mock_agent
 
 
 class TestExtractQueries:
@@ -39,7 +55,7 @@ class TestDedupResults:
             RetrievalResult(texts=["a", "b"], metadatas=[{}, {}], distances=[0.9, 0.8]),
             RetrievalResult(texts=["a", "c"], metadatas=[{}, {}], distances=[0.95, 0.7]),
         ]
-        texts, metas, dists = _dedup_results(results, k=10)
+        texts, _metas, _dists = _dedup_results(results, k=10)
         assert texts == ["a", "b", "c"]
 
     def test_respects_k_limit(self):
@@ -77,11 +93,7 @@ class TestAgenticSearch:
             )
         ]
 
-        mock_agent_result = AsyncMock()
-        mock_agent_result.data = mock_result
-
-        mock_agent = AsyncMock()
-        mock_agent.run = AsyncMock(return_value=mock_agent_result)
+        mock_agent = _make_mock_agent(mock_result)
 
         with patch("app.services.agent._get_agent", return_value=mock_agent):
             request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
@@ -96,14 +108,14 @@ class TestAgenticSearch:
         """Agent returns multiple retrieval results with overlapping docs."""
         mock_result = [
             RetrievalResult(texts=["same"], metadatas=[{"a": 1}], distances=[0.9]),
-            RetrievalResult(texts=["same", "unique"], metadatas=[{"a": 1}, {"b": 2}], distances=[0.95, 0.8]),
+            RetrievalResult(
+                texts=["same", "unique"],
+                metadatas=[{"a": 1}, {"b": 2}],
+                distances=[0.95, 0.8],
+            ),
         ]
 
-        mock_agent_result = AsyncMock()
-        mock_agent_result.data = mock_result
-
-        mock_agent = AsyncMock()
-        mock_agent.run = AsyncMock(return_value=mock_agent_result)
+        mock_agent = _make_mock_agent(mock_result)
 
         with patch("app.services.agent._get_agent", return_value=mock_agent):
             request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
@@ -112,22 +124,19 @@ class TestAgenticSearch:
         assert result.documents == [["same", "unique"]]
 
     async def test_messages_included_in_agent_prompt(self):
-        """When messages are provided alongside queries, they are passed to the agent as context."""
-        mock_result = [
-            RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
-        ]
+        """Messages are passed to the agent as conversation context."""
+        mock_result = [RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])]
 
-        mock_agent_result = AsyncMock()
-        mock_agent_result.data = mock_result
-
-        mock_agent = AsyncMock()
-        mock_agent.run = AsyncMock(return_value=mock_agent_result)
+        mock_agent = _make_mock_agent(mock_result)
 
         with patch("app.services.agent._get_agent", return_value=mock_agent):
             request = SearchRequest(
                 queries=["Hvad mere kan du sige om dette"],
                 messages=[
-                    ChatMessage(role="user", content="Hvad kan elektronisk underskrift bruges til"),
+                    ChatMessage(
+                        role="user",
+                        content="Hvad kan elektronisk underskrift bruges til",
+                    ),
                     ChatMessage(role="user", content="Hvad mere kan du sige om dette"),
                 ],
                 collection_names=["coll1"],

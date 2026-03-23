@@ -113,7 +113,10 @@ def _build_agent() -> Agent[AgentDeps, str]:
         ctx: RunContext[AgentDeps],
         queries: list[str],
     ) -> list[RetrievalResult]:
-        """Search the vector database with one or more queries. Returns documents, metadata, and relevance scores."""
+        """Search the vector database with one or more queries.
+
+        Returns documents, metadata, and relevance scores.
+        """
         log.info("Agent tool 'retrieve' called with queries=%s", queries)
         vectors = await embedding.embed_queries(queries)
         all_results: list[RetrievalResult] = []
@@ -225,9 +228,7 @@ def _dedup_results(
     distances: list[float] = []
 
     for result in results:
-        for text, meta, dist in zip(
-            result.texts, result.metadatas, result.distances, strict=True
-        ):
+        for text, meta, dist in zip(result.texts, result.metadatas, result.distances, strict=True):
             text_hash = hashlib.md5(text.encode()).hexdigest()
             if text_hash in seen:
                 continue
