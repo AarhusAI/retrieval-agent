@@ -123,8 +123,8 @@ class TestAgenticSearch:
 
         assert result.documents == [["same", "unique"]]
 
-    async def test_messages_included_in_agent_prompt(self):
-        """Messages are passed to the agent as conversation context."""
+    async def test_messages_used_as_primary_input(self):
+        """When messages are present, conversation is the primary input."""
         mock_result = [RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])]
 
         mock_agent = _make_mock_agent(mock_result)
@@ -144,8 +144,9 @@ class TestAgenticSearch:
             )
             await agentic_search(request)
 
-        # Verify the agent prompt includes conversation context
+        # Verify the agent prompt uses conversation as primary input
         prompt = mock_agent.run.call_args[0][0]
-        assert "Conversation context:" in prompt
+        assert "Conversation:" in prompt
         assert "elektronisk underskrift" in prompt
         assert "Hvad mere kan du sige om dette" in prompt
+        assert "Today's date:" in prompt

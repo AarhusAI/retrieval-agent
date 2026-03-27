@@ -37,8 +37,22 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
     if settings.enable_reranking:
         fetch_k = k * settings.initial_retrieval_multiplier
 
-    # Step 0: resolve queries — explicit queries take precedence over messages
-    queries = request.queries
+    # Step 0: resolve queries — prefer LLM generation from messages when available
+    queries = None
+
+    if request.messages and settings.enable_query_generation:
+        from app.services.query_generation import generate_queries_from_messages
+
+        queries = await generate_queries_from_messages(
+            request.messages,
+            template_override=request.retrieval_query_generation_prompt_template,
+        )
+        if queries:
+            log.info("Generated queries from messages: %s", queries)
+
+    if not queries:
+        queries = request.queries or []
+
     if not queries and request.messages:
         queries = extract_queries_from_messages(request.messages)
         log.info("Extracted queries from %d messages: %s", len(request.messages), queries)

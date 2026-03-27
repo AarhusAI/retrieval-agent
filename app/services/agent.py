@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel
@@ -74,17 +76,30 @@ class AgentDeps:
 
 SYSTEM_PROMPT = """\
 You are a retrieval specialist for a RAG system. Your job is to find the most \
-relevant documents for a user's query.
+relevant documents for a user's information needs by searching a vector database.
 
-You have access to tools for searching a vector database. For each query:
+## Query Analysis Guidelines
+- Generate 1-3 search queries optimized for semantic vector search.
+- Base queries on the **user's questions and information needs only**. \
+Use assistant responses solely for context and disambiguation \
+(e.g. resolving "this", "that", "the one you mentioned").
+- Generate queries as natural-language phrases that capture the semantic \
+meaning of the user's information need.
+- Reformulate conversational references into standalone, self-contained queries.
+- Each query should target a different aspect or angle to maximize retrieval \
+coverage.
+- If the user's message clearly needs no document retrieval (e.g. greetings, \
+small talk), call the retrieve tool with an empty list to signal no results needed.
+- Respond in the same language as the user's messages.
 
-1. ANALYZE the query — decide if it can be searched directly, needs rewriting \
-   for clarity, or should be decomposed into sub-queries. If conversation context \
-   is provided, use it to resolve vague references (e.g. "this", "that", "more about it") \
-   and rewrite the query to be self-contained.
-2. SEARCH using the retrieve tool.
+## Retrieval Strategy
+For each query:
+
+1. ANALYZE — decide if it can be searched directly, needs rewriting for \
+clarity, or should be decomposed into sub-queries.
+2. SEARCH using the retrieve tool with your optimized queries.
 3. GRADE the results — if they are not relevant to the original query, rewrite \
-   the query and try again (up to {max_iterations} attempts).
+the query and try again (up to {max_iterations} attempts).
 4. Return the final results.
 
 Keep queries concise and focused. When rewriting, make the query more specific \
@@ -108,7 +123,7 @@ def _build_agent() -> Agent[AgentDeps, str]:
         output_type=str,
     )
 
-    @agent.tool
+    @agent.tool(strict=False)
     async def retrieve(
         ctx: RunContext[AgentDeps],
         queries: list[str],
@@ -218,6 +233,17 @@ def extract_queries_from_messages(messages: list[ChatMessage]) -> list[str]:
     return []
 
 
+def _parse_fallback_queries(output: str) -> list[str] | None:
+    """Try to extract queries from agent text output (when it skips tool calling)."""
+    try:
+        data = json.loads(output)
+        if isinstance(data, dict) and "queries" in data:
+            return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def _dedup_results(
     results: list[RetrievalResult], k: int
 ) -> tuple[list[str], list[dict], list[float]]:
@@ -269,11 +295,24 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         fetch_k=fetch_k,
     )
 
-    user_prompt = f"Find the most relevant documents for: {'; '.join(queries)}\n"
-
     if request.messages:
         conversation = "\n".join(f"{m.role}: {m.content}" for m in request.messages)
-        user_prompt += f"\nConversation context:\n{conversation}\n"
+        user_prompt = (
+            f"Analyze the following conversation and find the most relevant "
+            f"documents for the user's latest information need.\n\n"
+            f"Today's date: {date.today().isoformat()}\n\n"
+            f"Conversation:\n{conversation}\n"
+        )
+    else:
+        user_prompt = f"Find the most relevant documents for: {'; '.join(queries)}\n"
+
+    # If Open WebUI passed a custom query generation template, include it
+    # so the agent reflects admin-configured guidelines.
+    if request.retrieval_query_generation_prompt_template:
+        user_prompt += (
+            f"\nAdditional query generation guidelines:\n"
+            f"{request.retrieval_query_generation_prompt_template}\n"
+        )
 
     user_prompt += (
         f"\nSearch across collections: {', '.join(request.collection_names)}\n"
@@ -288,7 +327,38 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         model_settings={"temperature": 0},
     )
 
-    # Use full results from deps (side-channel), not the agent's text output
+    # Fallback: if agent didn't call retrieve, do direct search
+    if deps.full_results is None:
+        log.warning(
+            "Agent did not call retrieve tool — falling back to direct search. "
+            "Agent output: %s",
+            result.output[:500] if result.output else "(empty)",
+        )
+        fallback_queries = _parse_fallback_queries(result.output) or queries
+        vectors = await embedding.embed_queries(fallback_queries)
+        fallback_results: list[RetrievalResult] = []
+        for query_text, query_vector in zip(fallback_queries, vectors, strict=True):
+            tasks = [
+                qdrant.vector_search(coll, query_vector, fetch_k)
+                for coll in request.collection_names
+            ]
+            results = await asyncio.gather(*tasks)
+            merged_texts: list[str] = []
+            merged_metadatas: list[dict] = []
+            merged_distances: list[float] = []
+            for r in results:
+                merged_texts.extend(r.texts)
+                merged_metadatas.extend(r.metadatas)
+                merged_distances.extend(r.distances)
+            fallback_results.append(
+                RetrievalResult(
+                    texts=merged_texts,
+                    metadatas=merged_metadatas,
+                    distances=merged_distances,
+                )
+            )
+        deps.full_results = fallback_results
+
     retrieval_results = deps.full_results or []
     log.info(
         "Agentic search complete: %d result sets, usage=%s",

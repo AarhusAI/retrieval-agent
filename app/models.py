@@ -11,6 +11,7 @@ class SearchRequest(BaseModel):
     messages: list[ChatMessage] | None = None
     collection_names: list[str]
     k: int = Field(default=5, ge=1)
+    retrieval_query_generation_prompt_template: str | None = None
 
     @model_validator(mode="after")
     def require_queries_or_messages(self):

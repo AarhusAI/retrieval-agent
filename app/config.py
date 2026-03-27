@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     reranker_api_key: str = ""
     initial_retrieval_multiplier: int = 3
 
+    # Query generation (from messages, for linear pipeline; agentic uses system prompt)
+    enable_query_generation: bool = True
+    retrieval_query_generation_prompt_template: str = ""
+
     # Agentic RAG
     enable_agentic_rag: bool = False
     agent_model: str = "gpt-4o-mini"

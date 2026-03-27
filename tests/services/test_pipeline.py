@@ -104,8 +104,10 @@ async def test_reranking_enabled(monkeypatch):
     assert result.documents[0] == ["doc2", "doc1"]
 
 
-async def test_search_with_messages_extracts_query():
-    """When only messages are provided, last user message is used as query."""
+async def test_search_with_messages_extracts_query_when_generation_disabled(monkeypatch):
+    """When query generation is disabled and only messages provided, last user message is used."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_query_generation", False)
+
     request = SearchRequest(
         messages=[
             ChatMessage(role="user", content="first question"),
@@ -129,11 +131,64 @@ async def test_search_with_messages_extracts_query():
     assert len(result.documents) == 1
 
 
-async def test_search_with_queries_and_messages_prefers_queries():
-    """When both queries and messages are provided, queries take precedence."""
+async def test_search_with_messages_uses_query_generation(monkeypatch):
+    """When query generation is enabled and messages provided, LLM queries are preferred."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_query_generation", True)
+
+    request = SearchRequest(
+        queries=["raw last message"],
+        messages=[ChatMessage(role="user", content="raw last message")],
+        collection_names=["coll1"],
+        k=2,
+    )
+    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+
+    with (
+        _patch_embed([[0.1]]) as mock_embed,
+        _patch_vsearch(mock_result),
+        patch(
+            "app.services.query_generation.generate_queries_from_messages",
+            new_callable=AsyncMock,
+            return_value=["optimized query"],
+        ),
+    ):
+        await linear_search(request)
+
+    mock_embed.assert_called_once_with(["optimized query"])
+
+
+async def test_search_falls_back_to_queries_when_generation_fails(monkeypatch):
+    """When query generation returns empty, fall back to request.queries."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_query_generation", True)
+
     request = SearchRequest(
         queries=["explicit query"],
         messages=[ChatMessage(role="user", content="message query")],
+        collection_names=["coll1"],
+        k=2,
+    )
+    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+
+    with (
+        _patch_embed([[0.1]]) as mock_embed,
+        _patch_vsearch(mock_result),
+        patch(
+            "app.services.query_generation.generate_queries_from_messages",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        await linear_search(request)
+
+    mock_embed.assert_called_once_with(["explicit query"])
+
+
+async def test_search_with_queries_only_no_generation(monkeypatch):
+    """When only queries are provided (no messages), use them directly."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_query_generation", True)
+
+    request = SearchRequest(
+        queries=["explicit query"],
         collection_names=["coll1"],
         k=2,
     )
