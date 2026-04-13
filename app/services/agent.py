@@ -330,14 +330,13 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
         log.warning(
-            "Agent did not call retrieve tool — falling back to direct search. "
-            "Agent output: %s",
+            "Agent did not call retrieve tool — falling back to direct search. Agent output: %s",
             result.output[:500] if result.output else "(empty)",
         )
         fallback_queries = _parse_fallback_queries(result.output) or queries
         vectors = await embedding.embed_queries(fallback_queries)
         fallback_results: list[RetrievalResult] = []
-        for query_text, query_vector in zip(fallback_queries, vectors, strict=True):
+        for _query_text, query_vector in zip(fallback_queries, vectors, strict=True):
             tasks = [
                 qdrant.vector_search(coll, query_vector, fetch_k)
                 for coll in request.collection_names
