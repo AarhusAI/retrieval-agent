@@ -146,3 +146,16 @@ tasks:
     cmds:
       - task: lint
       - task: test
+
+
+  # ---------------------------------------------------------------------------
+  # Build
+  # ---------------------------------------------------------------------------
+  build:image:
+    desc: "Build and push production image to ghcr.io"
+    vars:
+      IMAGE: ghcr.io/aarhusai/retrieval-agent
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build --target prod -t {{.IMAGE}}:{{.TAG}} .
+      - docker push {{.IMAGE}}:{{.TAG}}

@@ -10,8 +10,7 @@ services:
     build:
       dockerfile: Dockerfile
       context: .
-      args:
-        ENV: ${ENV:-dev}
+      target: ${TARGET:-dev}
       platforms:
         - "linux/amd64"
 #        - "linux/arm64"
