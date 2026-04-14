@@ -11,6 +11,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+if settings.debug:
+    logging.getLogger("app").setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 

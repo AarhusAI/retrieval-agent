@@ -48,6 +48,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = '{ "queries": ["budget cuts", "travel policy"] }'
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -64,6 +65,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = '{ "queries": [] }'
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -80,6 +82,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = 'Here are the queries: { "queries": ["query1"] } Done.'
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -96,6 +99,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = "I cannot help with that."
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -127,6 +131,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = '{ "queries": ["valid", 123, "", "also valid"] }'
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -148,6 +153,7 @@ class TestGenerateQueriesFromMessages:
         mock_choice.message.content = '{ "queries": ["custom"] }'
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
 
         mock_client = AsyncMock()
         mock_client.chat.completions.create = AsyncMock(return_value=mock_response)

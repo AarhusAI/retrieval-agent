@@ -10,9 +10,16 @@ Agentic retrieval service for Open WebUI, replacing the `retrieval-service` POC.
 
 All commands use [Task](https://taskfile.dev/) and run inside the Docker container (service name: `retrieval`). Python 3.11+ required. The Dockerfile uses multi-stage builds: `dev` target includes test/lint tools (ruff, pytest), `prod` target has runtime deps only. Docker Compose defaults to the `dev` target.
 
+**Important:** The retrieval service is defined in a compose override file. All Docker commands must be run from the parent `openwebui-docker/` directory using both compose files:
+
+```shell
+cd /path/to/openwebui-docker
+docker compose -f docker-compose.yml -f docker-compose.agentic-retrieval.yml exec retrieval <command>
+```
+
 ```shell
 # First-time setup
-cp .env.example .env        # then edit API_KEY and connection settings
+cp agentic-retrieval/.env.example agentic-retrieval/.env  # then edit API_KEY and connection settings
 task setup                   # starts containers + installs dev deps
 
 # Container management
@@ -33,10 +40,9 @@ task lint:format             # auto-format code
 task test                    # run all tests (pytest -v)
 task test:coverage           # run tests with coverage report
 
-# Run a single test file or test class
-docker compose exec retrieval pytest tests/services/test_agent.py -v
-docker compose exec retrieval pytest tests/services/test_agent.py::TestAgenticSearch -v
-docker compose exec retrieval pytest tests/services/test_agent.py::TestAgenticSearch::test_empty_queries -v
+# Run a single test file or test class (from parent dir)
+docker compose -f docker-compose.yml -f docker-compose.agentic-retrieval.yml exec retrieval pytest tests/services/test_agent.py -v
+docker compose -f docker-compose.yml -f docker-compose.agentic-retrieval.yml exec retrieval pytest tests/services/test_agent.py::TestAgenticSearch -v
 
 # CI (lint + test)
 task ci
@@ -56,7 +62,7 @@ Single FastAPI app (`app/main.py`) with two endpoints:
 ### Dual-Input Pattern
 
 `SearchRequest` (`app/models.py`) accepts two input modes reflecting how Open WebUI calls this service:
-- **`queries`** — pre-formed search strings (Open WebUI's default mode)
+- **`queries`** — pre-formed search strings (Open WebUI's default mode). Open WebUI runs its own query generation and sends the result.
 - **`messages`** — full chat history; the service extracts/generates queries itself. When `ENABLE_QUERY_GENERATION=true` (linear pipeline) or in agentic mode, an LLM generates optimized queries from the conversation. Otherwise falls back to the last user message.
 
 ### Pipeline Router (`app/services/pipeline.py`)
@@ -72,7 +78,11 @@ Single FastAPI app (`app/main.py`) with two endpoints:
 6. Dedup by MD5 text hash, limit to k
 
 **Agentic pipeline** (`app/services/agent.py`):
-A PydanticAI `Agent` with a `retrieve` tool wrapping the same retrieval services. The agent decides strategy (direct search, query rewriting, or decomposition), calls the tool, grades results, and retries with rewritten queries if poor (Corrective RAG, up to `AGENT_MAX_ITERATIONS` attempts). Tool results are stored in `AgentDeps.full_results` as a side-channel — only truncated previews (`agent_tool_preview_chars`) go to the LLM to save tokens. If the agent fails to call the retrieve tool, a fallback does direct vector search.
+A PydanticAI `Agent` with a `retrieve` tool wrapping the same retrieval services. The agent generates 1-2 search queries, calls the tool, and accepts results if any document is on-topic. It only retries with rewritten queries if results are completely off-topic (up to `AGENT_MAX_ITERATIONS` attempts).
+
+Tool results use a side-channel pattern: full results (with all metadata) are stored in `AgentDeps.full_results`, while only minimal previews go to the LLM — text truncated to `AGENT_TOOL_PREVIEW_CHARS`, metadata stripped to just `source`, and duplicates removed across queries by MD5 hash. This keeps token usage low for small-context models.
+
+If the agent fails to call the retrieve tool, a fallback parses queries from the output (supports plain JSON and Mistral `[TOOL_CALLS]` format) and does direct vector search.
 
 When reranking is enabled, initial retrieval fetches `k * INITIAL_RETRIEVAL_MULTIPLIER` candidates. All GPU/LLM services (embedding, reranking, agent) are configured as external OpenAI-compatible APIs — no local models.
 
@@ -95,16 +105,19 @@ All config via environment variables (or `.env` file), loaded by pydantic-settin
 - `ENABLE_QUERY_GENERATION` — toggle LLM-based query generation in the linear pipeline
 - `ENABLE_AGENTIC_RAG` — toggle agentic mode (when `false`, falls back to linear pipeline)
 - `AGENT_MODEL` / `AGENT_API_BASE_URL` / `AGENT_API_KEY` — LLM for both the PydanticAI agent loop and query generation (defaults to LiteLLM proxy at `http://litellm:4000/v1`; use a fast/cheap model like GPT-4o-mini)
+- `AGENT_TOOL_PREVIEW_CHARS` — max characters per document preview sent to the agent LLM (default 200)
+- `AGENT_STRICT_TOOLS` — enable strict tool definition validation in PydanticAI (default true; disable for models that don't support it)
+- `DEBUG` — set to `true` to enable debug logging for the `app` logger, which includes per-step token usage for agent LLM calls and query generation
 
 ## Rules
 
 - **Never read `.env` files.** They contain secrets (API keys, credentials). Use `.env.example` to understand available settings.
-- **Always run Python commands inside the Docker container.** `pip install`, `pytest`, `ruff`, and any other project commands must be executed via `docker compose exec retrieval ...` (or `docker compose run` if the container is not running). Never install or run Python tooling on the host.
+- **Always run Python commands inside the Docker container.** `pip install`, `pytest`, `ruff`, and any other project commands must be executed via `docker compose -f docker-compose.yml -f docker-compose.agentic-retrieval.yml exec retrieval ...` from the parent `openwebui-docker/` directory. Never install or run Python tooling on the host.
 
 ## Key Constraints
 
 - The embedding model and query prefix **must** be identical to what Open WebUI uses for indexing, or vector search will return garbage.
 - The Qdrant multitenancy mapping must mirror Open WebUI's `qdrant_multitenancy.py`. If upstream changes that mapping, this service breaks.
 - BM25 hybrid search scrolls entire collections from Qdrant on every query — only viable for small collections.
-- Agentic mode adds 2–5x latency and 2–4x token cost per query vs the linear pipeline. Use a small, fast model (e.g. GPT-4o-mini) for agent decisions.
+- Agentic mode adds latency and token cost per query vs the linear pipeline. Use a small, fast model for agent decisions. Be aware of the agent model's context window — tool results accumulate in the conversation history.
 - `AGENT_MAX_ITERATIONS` bounds the corrective RAG loop to prevent runaway retries.

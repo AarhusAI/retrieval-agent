@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     agent_api_key: str = ""
     agent_max_iterations: int = 3
     agent_tool_preview_chars: int = 200
+    agent_strict_tools: bool = True
+
+    # Debug
+    debug: bool = False
 
     # Server
     host: str = "0.0.0.0"

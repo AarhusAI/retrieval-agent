@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -16,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.config import settings
@@ -79,31 +81,29 @@ You are a retrieval specialist for a RAG system. Your job is to find the most \
 relevant documents for a user's information needs by searching a vector database.
 
 ## Query Analysis Guidelines
-- Generate 1-3 search queries optimized for semantic vector search.
+- Generate 1-2 search queries optimized for semantic vector search.
 - Base queries on the **user's questions and information needs only**. \
 Use assistant responses solely for context and disambiguation \
 (e.g. resolving "this", "that", "the one you mentioned").
 - Generate queries as natural-language phrases that capture the semantic \
 meaning of the user's information need.
 - Reformulate conversational references into standalone, self-contained queries.
-- Each query should target a different aspect or angle to maximize retrieval \
-coverage.
 - If the user's message clearly needs no document retrieval (e.g. greetings, \
 small talk), call the retrieve tool with an empty list to signal no results needed.
 - Respond in the same language as the user's messages.
 
 ## Retrieval Strategy
-For each query:
+1. SEARCH — call the retrieve tool with your optimized queries.
+2. ACCEPT the results if **any** returned document is on-topic for the user's \
+question, even partially. Partial coverage is expected — the downstream LLM \
+will synthesize the answer.
+3. RETRY only if the results are **completely off-topic** (none of the returned \
+documents relate to the query at all). Rewrite the query to be more specific \
+and try again (up to {max_iterations} attempts total). Do not retry just \
+because the answer is not explicitly stated — relevant context is enough.
 
-1. ANALYZE — decide if it can be searched directly, needs rewriting for \
-clarity, or should be decomposed into sub-queries.
-2. SEARCH using the retrieve tool with your optimized queries.
-3. GRADE the results — if they are not relevant to the original query, rewrite \
-the query and try again (up to {max_iterations} attempts).
-4. Return the final results.
-
-Keep queries concise and focused. When rewriting, make the query more specific \
-and unambiguous. When decomposing, break into 2-3 independent sub-queries.\
+Keep queries concise and focused. Prefer a single well-crafted query over \
+multiple overlapping ones.\
 """
 
 
@@ -114,6 +114,9 @@ def _build_agent() -> Agent[AgentDeps, str]:
         provider=OpenAIProvider(
             base_url=settings.agent_api_base_url or None,
             api_key=settings.agent_api_key or None,
+        ),
+        profile=OpenAIModelProfile(
+            openai_supports_strict_tool_definition=settings.agent_strict_tools,
         ),
     )
     agent = Agent(
@@ -194,18 +197,32 @@ def _build_agent() -> Agent[AgentDeps, str]:
         # Store full results in deps for later use in the response
         ctx.deps.full_results = all_results
 
-        # Return truncated previews to the LLM to save tokens
+        # Dedup across queries and build minimal previews for the LLM.
+        # Full metadata is preserved in deps.full_results — previews only
+        # include source name to save context window tokens.
         max_chars = settings.agent_tool_preview_chars
-        previews = []
+        seen: set[str] = set()
+        preview_texts: list[str] = []
+        preview_sources: list[str] = []
+        preview_distances: list[float] = []
+
         for r in all_results:
-            previews.append(
-                RetrievalResult(
-                    texts=[t[:max_chars] + "..." if len(t) > max_chars else t for t in r.texts],
-                    metadatas=r.metadatas,
-                    distances=r.distances,
-                )
+            for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
+                text_hash = hashlib.md5(text.encode()).hexdigest()
+                if text_hash in seen:
+                    continue
+                seen.add(text_hash)
+                preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
+                preview_sources.append(meta.get("source", ""))
+                preview_distances.append(dist)
+
+        return [
+            RetrievalResult(
+                texts=preview_texts,
+                metadatas=[{"source": s} for s in preview_sources],
+                distances=preview_distances,
             )
-        return previews
+        ]
 
     return agent
 
@@ -234,13 +251,30 @@ def extract_queries_from_messages(messages: list[ChatMessage]) -> list[str]:
 
 
 def _parse_fallback_queries(output: str) -> list[str] | None:
-    """Try to extract queries from agent text output (when it skips tool calling)."""
+    """Try to extract queries from agent text output (when it skips tool calling).
+
+    Handles two formats:
+    - Plain JSON: {"queries": ["q1", "q2"]}
+    - Mistral tool-call text: [TOOL_CALLS]retrieve{"queries": ["q1", "q2"]}
+    """
+    # Try plain JSON first
     try:
         data = json.loads(output)
         if isinstance(data, dict) and "queries" in data:
             return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
     except (json.JSONDecodeError, TypeError):
         pass
+
+    # Handle Mistral-style [TOOL_CALLS]function_name{...} format
+    match = re.search(r"\[TOOL_CALLS\]\w+(\{.*\})", output, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            if isinstance(data, dict) and "queries" in data:
+                return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return None
 
 
@@ -359,11 +393,34 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         deps.full_results = fallback_results
 
     retrieval_results = deps.full_results or []
+    run_usage = result.usage()
     log.info(
         "Agentic search complete: %d result sets, usage=%s",
         len(retrieval_results) if retrieval_results else 0,
-        result.usage(),
+        run_usage,
     )
+
+    # Log per-request token usage from each model response
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    step = 0
+    for msg in result.all_messages():
+        if isinstance(msg, ModelResponse):
+            step += 1
+            u = msg.usage
+            has_tool_calls = any(isinstance(p, ToolCallPart) for p in msg.parts)
+            role = "retrieve" if has_tool_calls else "evaluate"
+            log.debug(
+                "Agent step %d/%d (%s): model=%s, input_tokens=%d, "
+                "output_tokens=%d, total_tokens=%d",
+                step,
+                run_usage.requests,
+                role,
+                msg.model_name or settings.agent_model,
+                u.input_tokens,
+                u.output_tokens,
+                u.input_tokens + u.output_tokens,
+            )
     texts, metadatas, distances = _dedup_results(retrieval_results, k)
     log.info("Returning %d deduplicated results", len(texts))
 

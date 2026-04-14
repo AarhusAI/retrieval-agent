@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
@@ -10,11 +10,21 @@ from app.services.agent import (
 )
 
 
+def _mock_usage(input_tokens=100, output_tokens=50, requests=2, tool_calls=1):
+    """Create a mock PydanticAI Usage object."""
+    usage = MagicMock()
+    usage.input_tokens = input_tokens
+    usage.output_tokens = output_tokens
+    usage.requests = requests
+    usage.tool_calls = tool_calls
+    return usage
+
+
 def _make_mock_agent(full_results: list[RetrievalResult]):
     """Create a mock agent whose run() populates deps.full_results."""
-    mock_agent_result = AsyncMock()
+    mock_agent_result = MagicMock()
     mock_agent_result.output = "done"
-    mock_agent_result.usage.return_value = None
+    mock_agent_result.usage.return_value = _mock_usage()
 
     async def _run(prompt, *, deps: AgentDeps, **kwargs):
         deps.full_results = full_results

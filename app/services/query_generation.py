@@ -100,6 +100,16 @@ async def generate_queries_from_messages(
         )
         content = response.choices[0].message.content or ""
 
+        if response.usage:
+            log.debug(
+                "Query generation token usage: model=%s, prompt_tokens=%d, "
+                "completion_tokens=%d, total_tokens=%d",
+                settings.agent_model,
+                response.usage.prompt_tokens or 0,
+                response.usage.completion_tokens or 0,
+                response.usage.total_tokens or 0,
+            )
+
         # Parse JSON — tolerant of extra text around the JSON object
         bracket_start = content.find("{")
         bracket_end = content.rfind("}") + 1
