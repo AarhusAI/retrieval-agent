@@ -57,7 +57,8 @@ task build:image TAG=v1.0.0  # with specific tag
 Single FastAPI app (`app/main.py`) with two endpoints:
 
 - **`POST /search`** — Bearer-token auth via `API_KEY`. Accepts either `queries` (explicit search strings) or `messages` (chat history for query extraction), plus `collection_names` and `k`. Returns `{documents, metadatas, distances}`.
-- **`GET /health`** — healthcheck.
+- **`GET /health`** — liveness probe (always 200 if the process is running).
+- **`GET /health/ready`** — readiness probe (verifies Qdrant connectivity, returns 503 if unreachable).
 
 ### Dual-Input Pattern
 
@@ -82,7 +83,9 @@ A PydanticAI `Agent` with a `retrieve` tool wrapping the same retrieval services
 
 Tool results use a side-channel pattern: full results (with all metadata) are stored in `AgentDeps.full_results`, while only minimal previews go to the LLM — text truncated to `AGENT_TOOL_PREVIEW_CHARS`, metadata stripped to just `source`, and duplicates removed across queries by MD5 hash. This keeps token usage low for small-context models.
 
-If the agent fails to call the retrieve tool, a fallback parses queries from the output (supports plain JSON and Mistral `[TOOL_CALLS]` format) and does direct vector search.
+If the agent fails to call the retrieve tool, a fallback parses queries from the output (supports plain JSON and Mistral `[TOOL_CALLS]` format) and does direct vector search. The fallback is wrapped in exception handling — if embedding or Qdrant fails, it returns empty results rather than crashing.
+
+The agent run is bounded by `AGENT_TIMEOUT` (default 60s wall-clock). On timeout, whatever partial results the retrieve tool has collected so far are returned. Multiple retrieve calls (corrective RAG retries) accumulate results rather than overwriting.
 
 When reranking is enabled, initial retrieval fetches `k * INITIAL_RETRIEVAL_MULTIPLIER` candidates. All GPU/LLM services (embedding, reranking, agent) are configured as external OpenAI-compatible APIs — no local models.
 
@@ -107,6 +110,9 @@ All config via environment variables (or `.env` file), loaded by pydantic-settin
 - `AGENT_MODEL` / `AGENT_API_BASE_URL` / `AGENT_API_KEY` — LLM for both the PydanticAI agent loop and query generation (defaults to LiteLLM proxy at `http://litellm:4000/v1`; use a fast/cheap model like GPT-4o-mini)
 - `AGENT_TOOL_PREVIEW_CHARS` — max characters per document preview sent to the agent LLM (default 200)
 - `AGENT_STRICT_TOOLS` — enable strict tool definition validation in PydanticAI (default true; disable for models that don't support it)
+- `AGENT_TIMEOUT` — wall-clock timeout in seconds for the agent run (default 60); returns partial results on timeout
+- `AGENT_SYSTEM_PROMPT` — override the default agent system prompt (uses built-in prompt when empty)
+- `BM25_CACHE_TTL_SECONDS` — TTL for in-memory BM25 index cache (default 300s); avoids re-scrolling Qdrant on every query
 - `DEBUG` — set to `true` to enable debug logging for the `app` logger, which includes per-step token usage for agent LLM calls and query generation
 
 ## Rules
@@ -118,6 +124,8 @@ All config via environment variables (or `.env` file), loaded by pydantic-settin
 
 - The embedding model and query prefix **must** be identical to what Open WebUI uses for indexing, or vector search will return garbage.
 - The Qdrant multitenancy mapping must mirror Open WebUI's `qdrant_multitenancy.py`. If upstream changes that mapping, this service breaks.
-- BM25 hybrid search scrolls entire collections from Qdrant on every query — only viable for small collections.
+- BM25 hybrid search scrolls entire collections from Qdrant — only viable for small collections. Results are cached in-memory with a TTL (`BM25_CACHE_TTL_SECONDS`, default 5 min) to avoid re-scrolling on every query.
 - Agentic mode adds latency and token cost per query vs the linear pipeline. Use a small, fast model for agent decisions. Be aware of the agent model's context window — tool results accumulate in the conversation history.
-- `AGENT_MAX_ITERATIONS` bounds the corrective RAG loop to prevent runaway retries.
+- `AGENT_MAX_ITERATIONS` bounds the corrective RAG loop to prevent runaway retries. `AGENT_TIMEOUT` provides a hard wall-clock cap.
+- The reranker gracefully falls back to unranked results on HTTP or connection errors — it won't take down the whole search if the reranker endpoint is unavailable.
+- Qdrant `vector_search` only catches `UnexpectedResponse` (e.g. collection not found). Connection errors and auth failures propagate as 500s for proper error visibility.

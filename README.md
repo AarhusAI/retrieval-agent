@@ -72,7 +72,10 @@ docker build -t agentic-retrieval .
 docker run --env-file .env -p 8000:8000 agentic-retrieval
 ```
 
-The service exposes a healthcheck at `GET /health`.
+The service exposes two health endpoints:
+
+- `GET /health` — liveness probe (always returns 200 if the process is running)
+- `GET /health/ready` — readiness probe (verifies Qdrant connectivity, returns 503 if unreachable)
 
 ## API
 
@@ -165,6 +168,7 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `EMBEDDING_QUERY_PREFIX`       | `query: `                               | Prefix applied to queries before embedding                                             |
 | `ENABLE_HYBRID_SEARCH`         | `false`                                 | Enable BM25 + vector Reciprocal Rank Fusion                                            |
 | `HYBRID_BM25_WEIGHT`           | `0.3`                                   | BM25 weight in fusion (vector weight = 1 - this)                                       |
+| `BM25_CACHE_TTL_SECONDS`       | `300`                                   | TTL for in-memory BM25 index cache (avoids re-scrolling Qdrant per query)              |
 | `ENABLE_RERANKING`             | `false`                                 | Enable cross-encoder reranking stage                                                   |
 | `RERANKER_MODEL`               | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model for reranking                                                      |
 | `RERANKER_API_BASE_URL`        |                                         | OpenAI-compatible reranker endpoint (e.g. `https://embed.itkdev.dk`)                   |
@@ -177,6 +181,10 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `AGENT_API_KEY`                |                                         | API key for agent LLM endpoint                                                         |
 | `AGENT_MAX_ITERATIONS`         | `3`                                     | Max corrective RAG retry iterations                                                    |
 | `AGENT_TOOL_PREVIEW_CHARS`     | `200`                                   | Max chars of document text sent to agent LLM for grading (full text stored separately) |
+| `AGENT_STRICT_TOOLS`           | `true`                                  | Enable strict tool definition validation in PydanticAI (disable for models that don't support it) |
+| `AGENT_TIMEOUT`                | `60`                                    | Wall-clock timeout (seconds) for the agent run — returns partial results on timeout    |
+| `AGENT_SYSTEM_PROMPT`          |                                         | Override the default agent system prompt (uses built-in prompt when empty)              |
+| `DEBUG`                        | `false`                                 | Enable debug logging (includes per-step token usage for agent and query generation)    |
 | `HOST`                         | `0.0.0.0`                               | Server bind address                                                                    |
 | `PORT`                         | `8000`                                  | Server port                                                                            |
 
@@ -268,7 +276,8 @@ flowchart TD
 
 ### Notes
 
-- BM25 hybrid search scrolls entire collections from Qdrant per query — only practical for small collections.
+- BM25 hybrid search scrolls entire collections from Qdrant — only practical for small collections. Results are cached
+  in-memory with a TTL (`BM25_CACHE_TTL_SECONDS`, default 5 min) to avoid re-scrolling on every query.
 - When reranking is enabled, the initial retrieval fetches `k × INITIAL_RETRIEVAL_MULTIPLIER` candidates to give the
   reranker a larger pool.
 - Agentic mode adds 2–5× latency and 2–4× token cost per query. Use a fast, cheap model (e.g. GPT-4o-mini) for agent
