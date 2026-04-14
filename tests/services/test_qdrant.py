@@ -1,5 +1,8 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+from qdrant_client.http.exceptions import UnexpectedResponse
+
 from app.services.qdrant import QdrantResult, vector_search
 
 
@@ -47,9 +50,12 @@ async def test_vector_search_empty_payload():
     assert result.metadatas == [{}]
 
 
-async def test_vector_search_exception_returns_empty():
+async def test_vector_search_unexpected_response_returns_empty():
+    """UnexpectedResponse (e.g. collection not found) returns empty results."""
     mock_client = MagicMock()
-    mock_client.query_points.side_effect = Exception("connection error")
+    mock_client.query_points.side_effect = UnexpectedResponse(
+        status_code=404, content=b"Not found", reason_phrase="Not Found", headers={}
+    )
 
     with patch("app.services.qdrant.get_client", return_value=mock_client):
         result = await vector_search("file-abc", [0.1], k=5)
@@ -57,6 +63,18 @@ async def test_vector_search_exception_returns_empty():
     assert result.texts == []
     assert result.metadatas == []
     assert result.distances == []
+
+
+async def test_vector_search_connection_error_propagates():
+    """Connection errors (not UnexpectedResponse) should propagate."""
+    mock_client = MagicMock()
+    mock_client.query_points.side_effect = ConnectionError("connection refused")
+
+    with (
+        patch("app.services.qdrant.get_client", return_value=mock_client),
+        pytest.raises(ConnectionError),
+    ):
+        await vector_search("file-abc", [0.1], k=5)
 
 
 async def test_vector_search_applies_tenant_filter():

@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass
 
 from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.config import settings
 
@@ -101,7 +102,7 @@ async def vector_search(
             query_filter=query_filter,
             limit=k,
         )
-    except Exception:
+    except UnexpectedResponse:
         log.exception("Qdrant query failed for collection %s", qdrant_collection)
         return QdrantResult(texts=[], metadatas=[], distances=[])
 

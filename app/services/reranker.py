@@ -6,6 +6,22 @@ from app.config import settings
 
 log = logging.getLogger(__name__)
 
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=30.0)
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 async def rerank(
     query: str,
@@ -16,6 +32,7 @@ async def rerank(
     """
     Rerank documents via OpenAI-compatible /v1/rerank endpoint.
     Returns (texts, metadatas, scores) sorted by relevance score, limited to k.
+    Falls back to unranked results (truncated to k) on HTTP or connection errors.
     """
     if not documents:
         return [], [], []
@@ -31,10 +48,14 @@ async def rerank(
     if settings.reranker_api_key:
         headers["Authorization"] = f"Bearer {settings.reranker_api_key}"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    try:
+        client = get_client()
         resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
+    except (httpx.HTTPStatusError, httpx.ConnectError) as exc:
+        log.warning("Reranker request failed (%s), returning unranked results", exc)
+        return documents[:k], metadatas[:k], [0.0] * min(len(documents), k)
 
     # Response format: {"results": [{"index": 0, "relevance_score": 0.9}, ...]}
     results = sorted(data["results"], key=lambda x: x["index"])

@@ -12,6 +12,8 @@ COPY pyproject.toml .
 FROM base AS dev
 RUN pip install --no-cache-dir ".[dev]"
 COPY app/ app/
+RUN adduser --system --no-create-home appuser
+USER appuser
 EXPOSE 8000
 HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -20,6 +22,8 @@ CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "
 FROM base AS prod
 RUN pip install --no-cache-dir .
 COPY app/ app/
+RUN adduser --system --no-create-home appuser
+USER appuser
 EXPOSE 8000
 HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

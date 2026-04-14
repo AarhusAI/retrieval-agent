@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config import settings
 from app.main import app
-from app.services import qdrant
+from app.services import bm25, embedding, qdrant, query_generation, reranker
 
 # Force settings to match test env (in case .env file or container env overrode them)
 settings.api_key = "test-api-key"
@@ -32,6 +32,10 @@ async def client():
 
 
 @pytest.fixture(autouse=True)
-def reset_qdrant_client():
+def reset_clients():
     yield
     qdrant._client = None
+    embedding._client = None
+    reranker._client = None
+    query_generation._client = None
+    bm25.clear_cache()

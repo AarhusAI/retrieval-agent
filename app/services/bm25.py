@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import time
+from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
 
+from app.config import settings
 from app.services.qdrant import scroll_collection_texts
 
 log = logging.getLogger(__name__)
@@ -10,6 +13,67 @@ log = logging.getLogger(__name__)
 
 def _tokenize(text: str) -> list[str]:
     return text.lower().split()
+
+
+@dataclass
+class _CacheEntry:
+    bm25: BM25Okapi
+    texts: tuple[str, ...]
+    expires_at: float
+
+
+_cache: dict[str, _CacheEntry] = {}
+_cache_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_lock(collection_name: str) -> asyncio.Lock:
+    if collection_name not in _cache_locks:
+        _cache_locks[collection_name] = asyncio.Lock()
+    return _cache_locks[collection_name]
+
+
+def clear_cache() -> None:
+    """Clear the BM25 cache (for testing)."""
+    _cache.clear()
+    _cache_locks.clear()
+
+
+async def _get_or_build_index(
+    collection_name: str,
+) -> tuple[BM25Okapi, tuple[str, ...]] | None:
+    """Get cached BM25 index or build a new one. Returns None for empty collections."""
+    now = time.monotonic()
+    entry = _cache.get(collection_name)
+    if entry is not None and entry.expires_at > now:
+        return entry.bm25, entry.texts
+
+    lock = _get_lock(collection_name)
+    async with lock:
+        # Double-check after acquiring lock
+        entry = _cache.get(collection_name)
+        if entry is not None and entry.expires_at > now:
+            return entry.bm25, entry.texts
+
+        docs = await asyncio.to_thread(scroll_collection_texts, collection_name)
+        if not docs:
+            return None
+
+        _ids, texts = zip(*docs, strict=True)
+        tokenized = [_tokenize(t) for t in texts]
+        bm25 = BM25Okapi(tokenized)
+
+        _cache[collection_name] = _CacheEntry(
+            bm25=bm25,
+            texts=texts,
+            expires_at=now + settings.bm25_cache_ttl_seconds,
+        )
+        log.info(
+            "BM25 index built for %s: %d documents (TTL=%ds)",
+            collection_name,
+            len(texts),
+            settings.bm25_cache_ttl_seconds,
+        )
+        return bm25, texts
 
 
 async def bm25_search(
@@ -20,15 +84,13 @@ async def bm25_search(
     """
     BM25 search over all documents in a collection.
     Returns list of (text, score) sorted by score descending.
+    Uses a TTL-based in-memory cache to avoid rebuilding the index on every query.
     """
-    docs = await asyncio.to_thread(scroll_collection_texts, collection_name)
-    if not docs:
+    result = await _get_or_build_index(collection_name)
+    if result is None:
         return []
 
-    _ids, texts = zip(*docs, strict=True)
-    tokenized = [_tokenize(t) for t in texts]
-
-    bm25 = BM25Okapi(tokenized)
+    bm25, texts = result
     scores = bm25.get_scores(_tokenize(query))
 
     scored = list(zip(texts, scores, strict=True))

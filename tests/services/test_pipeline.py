@@ -240,6 +240,40 @@ async def test_search_routes_to_linear_when_agentic_disabled(monkeypatch):
     assert result.documents[0] == ["doc1"]
 
 
+async def test_hybrid_search_preserves_first_metadata(monkeypatch):
+    """When two docs have same text but different metadata, first occurrence wins."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_hybrid_search", True)
+
+    request = SearchRequest(queries=["hello"], collection_names=["c1", "c2"], k=5)
+
+    # c1 returns "same text" with meta {"src": "first"}, c2 returns it with {"src": "second"}
+    call_count = 0
+
+    async def mock_vsearch(coll, vec, k_val):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return QdrantResult(
+                texts=["same text"], metadatas=[{"src": "first"}], distances=[0.9]
+            )
+        return QdrantResult(
+            texts=["same text"], metadatas=[{"src": "second"}], distances=[0.8]
+        )
+
+    async def mock_bm25(coll, query, k_val):
+        return [("same text", 5.0)]
+
+    with (
+        _patch_embed([[0.1]]),
+        patch(VSEARCH_PATH, new_callable=AsyncMock, side_effect=mock_vsearch),
+        patch("app.services.pipeline.bm25_search", new_callable=AsyncMock, side_effect=mock_bm25),
+    ):
+        result = await linear_search(request)
+
+    # First occurrence metadata should be preserved
+    assert result.metadatas[0][0]["src"] == "first"
+
+
 async def test_search_routes_to_agentic_when_enabled(monkeypatch):
     """When enable_agentic_rag=True, search() delegates to agentic_search."""
     monkeypatch.setattr("app.services.pipeline.settings.enable_agentic_rag", True)

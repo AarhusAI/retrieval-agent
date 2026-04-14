@@ -119,9 +119,14 @@ def _build_agent() -> Agent[AgentDeps, str]:
             openai_supports_strict_tool_definition=settings.agent_strict_tools,
         ),
     )
+    prompt = (
+        settings.agent_system_prompt
+        if settings.agent_system_prompt.strip()
+        else SYSTEM_PROMPT.format(max_iterations=settings.agent_max_iterations)
+    )
     agent = Agent(
         model,
-        system_prompt=SYSTEM_PROMPT.format(max_iterations=settings.agent_max_iterations),
+        system_prompt=prompt,
         deps_type=AgentDeps,
         output_type=str,
     )
@@ -170,7 +175,10 @@ def _build_agent() -> Agent[AgentDeps, str]:
                 fused = reciprocal_rank_fusion(
                     vector_ranked, bm25_merged, settings.hybrid_bm25_weight
                 )
-                text_to_meta = dict(zip(merged_texts, merged_metadatas, strict=True))
+                text_to_meta: dict[str, dict] = {}
+                for text, meta in zip(merged_texts, merged_metadatas, strict=True):
+                    if text not in text_to_meta:
+                        text_to_meta[text] = meta
                 merged_texts = [text for text, _ in fused]
                 merged_distances = [score for _, score in fused]
                 merged_metadatas = [text_to_meta.get(t, {}) for t in merged_texts]
@@ -194,8 +202,8 @@ def _build_agent() -> Agent[AgentDeps, str]:
                 )
             )
 
-        # Store full results in deps for later use in the response
-        ctx.deps.full_results = all_results
+        # Accumulate full results across retries (dedup happens downstream)
+        ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
 
         # Dedup across queries and build minimal previews for the LLM.
         # Full metadata is preserved in deps.full_results — previews only
@@ -266,12 +274,16 @@ def _parse_fallback_queries(output: str) -> list[str] | None:
         pass
 
     # Handle Mistral-style [TOOL_CALLS]function_name{...} format
-    match = re.search(r"\[TOOL_CALLS\]\w+(\{.*\})", output, re.DOTALL)
+    match = re.search(r"\[TOOL_CALLS\]\w+(\{.+)", output, re.DOTALL)
     if match:
         try:
-            data = json.loads(match.group(1))
-            if isinstance(data, dict) and "queries" in data:
-                return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
+            raw = match.group(1)
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start != -1 and end > 0:
+                data = json.loads(raw[start:end])
+                if isinstance(data, dict) and "queries" in data:
+                    return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -355,11 +367,22 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     log.info("Agentic search: queries=%s, collections=%s", queries, request.collection_names)
 
-    result = await agent.run(
-        user_prompt,
-        deps=deps,
-        model_settings={"temperature": 0},
-    )
+    try:
+        result = await asyncio.wait_for(
+            agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
+            timeout=settings.agent_timeout,
+        )
+    except TimeoutError:
+        log.warning(
+            "Agent timed out after %ds, returning partial results", settings.agent_timeout
+        )
+        retrieval_results = deps.full_results or []
+        texts, metadatas, distances = _dedup_results(retrieval_results, k)
+        return SearchResponse(
+            documents=[texts],
+            metadatas=[metadatas],
+            distances=[distances],
+        )
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
@@ -367,30 +390,34 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
             "Agent did not call retrieve tool — falling back to direct search. Agent output: %s",
             result.output[:500] if result.output else "(empty)",
         )
-        fallback_queries = _parse_fallback_queries(result.output) or queries
-        vectors = await embedding.embed_queries(fallback_queries)
-        fallback_results: list[RetrievalResult] = []
-        for _query_text, query_vector in zip(fallback_queries, vectors, strict=True):
-            tasks = [
-                qdrant.vector_search(coll, query_vector, fetch_k)
-                for coll in request.collection_names
-            ]
-            results = await asyncio.gather(*tasks)
-            merged_texts: list[str] = []
-            merged_metadatas: list[dict] = []
-            merged_distances: list[float] = []
-            for r in results:
-                merged_texts.extend(r.texts)
-                merged_metadatas.extend(r.metadatas)
-                merged_distances.extend(r.distances)
-            fallback_results.append(
-                RetrievalResult(
-                    texts=merged_texts,
-                    metadatas=merged_metadatas,
-                    distances=merged_distances,
+        try:
+            fallback_queries = _parse_fallback_queries(result.output) or queries
+            vectors = await embedding.embed_queries(fallback_queries)
+            fallback_results: list[RetrievalResult] = []
+            for _query_text, query_vector in zip(fallback_queries, vectors, strict=True):
+                tasks = [
+                    qdrant.vector_search(coll, query_vector, fetch_k)
+                    for coll in request.collection_names
+                ]
+                results = await asyncio.gather(*tasks)
+                merged_texts: list[str] = []
+                merged_metadatas: list[dict] = []
+                merged_distances: list[float] = []
+                for r in results:
+                    merged_texts.extend(r.texts)
+                    merged_metadatas.extend(r.metadatas)
+                    merged_distances.extend(r.distances)
+                fallback_results.append(
+                    RetrievalResult(
+                        texts=merged_texts,
+                        metadatas=merged_metadatas,
+                        distances=merged_distances,
+                    )
                 )
-            )
-        deps.full_results = fallback_results
+            deps.full_results = fallback_results
+        except Exception:
+            log.exception("Agent fallback direct search failed")
+            deps.full_results = []
 
     retrieval_results = deps.full_results or []
     run_usage = result.usage()

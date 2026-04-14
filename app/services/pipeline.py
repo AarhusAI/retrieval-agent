@@ -98,8 +98,11 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
 
             fused = reciprocal_rank_fusion(vector_ranked, bm25_merged, settings.hybrid_bm25_weight)
 
-            # Rebuild ordered results from fused ranking
-            text_to_meta = dict(zip(merged_texts, merged_metadatas, strict=True))
+            # Rebuild ordered results from fused ranking (keep first occurrence metadata)
+            text_to_meta: dict[str, dict] = {}
+            for text, meta in zip(merged_texts, merged_metadatas, strict=True):
+                if text not in text_to_meta:
+                    text_to_meta[text] = meta
             merged_texts = [text for text, _ in fused]
             merged_distances = [score for _, score in fused]
             merged_metadatas = [text_to_meta.get(t, {}) for t in merged_texts]

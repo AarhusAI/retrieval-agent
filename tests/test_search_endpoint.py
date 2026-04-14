@@ -105,3 +105,42 @@ async def test_search_default_k(client, api_headers):
             headers=api_headers,
         )
     assert mock.call_args[0][0].k == 5
+
+
+async def test_search_too_many_queries(client, api_headers):
+    """More than 10 queries should be rejected."""
+    resp = await client.post(
+        "/search",
+        json={
+            "queries": [f"query{i}" for i in range(11)],
+            "collection_names": ["coll1"],
+        },
+        headers=api_headers,
+    )
+    assert resp.status_code == 422
+
+
+async def test_search_query_too_long(client, api_headers):
+    """Individual query exceeding 2000 chars should be rejected."""
+    resp = await client.post(
+        "/search",
+        json={
+            "queries": ["x" * 2001],
+            "collection_names": ["coll1"],
+        },
+        headers=api_headers,
+    )
+    assert resp.status_code == 422
+
+
+async def test_search_too_many_collections(client, api_headers):
+    """More than 20 collections should be rejected."""
+    resp = await client.post(
+        "/search",
+        json={
+            "queries": ["hello"],
+            "collection_names": [f"coll{i}" for i in range(21)],
+        },
+        headers=api_headers,
+    )
+    assert resp.status_code == 422

@@ -2,10 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.routes.search import router as search_router
-from app.services import qdrant
+from app.services import embedding, qdrant, query_generation, reranker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +36,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    await embedding.close_client()
+    await reranker.close_client()
+    await query_generation.close_client()
     qdrant.close_client()
     log.info("Agentic retrieval service shut down")
 
@@ -52,6 +56,20 @@ app.include_router(search_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Readiness probe — verifies Qdrant connectivity."""
+    try:
+        qdrant.get_client().get_collections()
+        return {"status": "ok"}
+    except Exception as exc:
+        log.warning("Readiness check failed: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "detail": str(exc)},
+        )
 
 
 if __name__ == "__main__":

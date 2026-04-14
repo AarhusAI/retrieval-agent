@@ -65,3 +65,46 @@ async def test_rerank_empty_documents():
     assert texts == []
     assert metas == []
     assert scores == []
+
+
+async def test_rerank_http_error_falls_back_to_unranked():
+    """When reranker API returns 500, fall back to unranked results truncated to k."""
+    mock_response = httpx.Response(
+        500,
+        json={"error": "server error"},
+        request=_FAKE_REQUEST,
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_response
+    ):
+        texts, metas, scores = await rerank(
+            "query",
+            ["doc1", "doc2", "doc3"],
+            [{"id": 1}, {"id": 2}, {"id": 3}],
+            k=2,
+        )
+
+    # Should return first k documents unranked
+    assert texts == ["doc1", "doc2"]
+    assert metas == [{"id": 1}, {"id": 2}]
+    assert scores == [0.0, 0.0]
+
+
+async def test_rerank_connect_error_falls_back_to_unranked():
+    """When reranker API is unreachable, fall back to unranked results."""
+    with patch.object(
+        httpx.AsyncClient,
+        "post",
+        new_callable=AsyncMock,
+        side_effect=httpx.ConnectError("Connection refused"),
+    ):
+        texts, metas, scores = await rerank(
+            "query",
+            ["doc1", "doc2"],
+            [{"id": 1}, {"id": 2}],
+            k=5,
+        )
+
+    assert texts == ["doc1", "doc2"]
+    assert metas == [{"id": 1}, {"id": 2}]
+    assert scores == [0.0, 0.0]

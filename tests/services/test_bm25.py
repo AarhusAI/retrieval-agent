@@ -1,4 +1,6 @@
-from app.services.bm25 import _tokenize, reciprocal_rank_fusion
+from unittest.mock import patch
+
+from app.services.bm25 import _tokenize, bm25_search, reciprocal_rank_fusion
 
 
 class TestTokenize:
@@ -57,3 +59,35 @@ class TestReciprocalRankFusion:
         fused = reciprocal_rank_fusion(vector, bm25, bm25_weight=0.5)
         scores = [s for _, s in fused]
         assert scores == sorted(scores, reverse=True)
+
+
+class TestBm25Cache:
+    async def test_cache_prevents_repeated_scrolls(self):
+        """Second call to bm25_search with same collection should use cached index."""
+        mock_docs = [("id1", "hello world"), ("id2", "foo bar")]
+        with patch(
+            "app.services.bm25.scroll_collection_texts", return_value=mock_docs
+        ) as mock_scroll:
+            result1 = await bm25_search("test-coll", "hello", k=2)
+            result2 = await bm25_search("test-coll", "foo", k=2)
+
+        # scroll should only be called once (cached on second call)
+        assert mock_scroll.call_count == 1
+        assert len(result1) > 0
+        assert len(result2) > 0
+
+    async def test_empty_collection_returns_empty(self):
+        with patch("app.services.bm25.scroll_collection_texts", return_value=[]):
+            result = await bm25_search("empty-coll", "hello", k=2)
+
+        assert result == []
+
+    async def test_different_collections_have_separate_caches(self):
+        mock_docs = [("id1", "hello world")]
+        with patch(
+            "app.services.bm25.scroll_collection_texts", return_value=mock_docs
+        ) as mock_scroll:
+            await bm25_search("coll-a", "hello", k=2)
+            await bm25_search("coll-b", "hello", k=2)
+
+        assert mock_scroll.call_count == 2

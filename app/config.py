@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Hybrid search
     enable_hybrid_search: bool = False
     hybrid_bm25_weight: float = 0.3
+    bm25_cache_ttl_seconds: int = 300
 
     # Reranking (OpenAI-compatible API)
     enable_reranking: bool = False
@@ -42,6 +43,8 @@ class Settings(BaseSettings):
     agent_max_iterations: int = 3
     agent_tool_preview_chars: int = 200
     agent_strict_tools: bool = True
+    agent_timeout: int = 60
+    agent_system_prompt: str = ""
 
     # Debug
     debug: bool = False

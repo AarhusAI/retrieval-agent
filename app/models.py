@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChatMessage(BaseModel):
@@ -7,11 +7,20 @@ class ChatMessage(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    queries: list[str] | None = None
+    queries: list[str] | None = Field(default=None, max_length=10)
     messages: list[ChatMessage] | None = None
-    collection_names: list[str]
+    collection_names: list[str] = Field(max_length=20)
     k: int = Field(default=5, ge=1)
     retrieval_query_generation_prompt_template: str | None = None
+
+    @field_validator("queries")
+    @classmethod
+    def validate_query_length(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            for q in v:
+                if len(q) > 2000:
+                    raise ValueError("Individual query must not exceed 2000 characters")
+        return v
 
     @model_validator(mode="after")
     def require_queries_or_messages(self):

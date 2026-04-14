@@ -12,12 +12,33 @@ import json
 import logging
 from datetime import date
 
+import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
 from app.models import ChatMessage
 
 log = logging.getLogger(__name__)
+
+_client: AsyncOpenAI | None = None
+
+
+def get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            base_url=settings.agent_api_base_url or None,
+            api_key=settings.agent_api_key or "unused",
+            timeout=httpx.Timeout(30.0),
+        )
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.close()
+        _client = None
 
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """\
 ### Task:
@@ -89,10 +110,7 @@ async def generate_queries_from_messages(
     prompt = render_template(template, messages)
 
     try:
-        client = AsyncOpenAI(
-            base_url=settings.agent_api_base_url or None,
-            api_key=settings.agent_api_key or "unused",
-        )
+        client = get_client()
         response = await client.chat.completions.create(
             model=settings.agent_model,
             messages=[{"role": "user", "content": prompt}],

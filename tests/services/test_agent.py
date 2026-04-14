@@ -5,6 +5,7 @@ from app.services.agent import (
     AgentDeps,
     RetrievalResult,
     _dedup_results,
+    _parse_fallback_queries,
     agentic_search,
     extract_queries_from_messages,
 )
@@ -160,3 +161,78 @@ class TestAgenticSearch:
         assert "elektronisk underskrift" in prompt
         assert "Hvad mere kan du sige om dette" in prompt
         assert "Today's date:" in prompt
+
+    async def test_fallback_handles_embed_failure(self):
+        """When agent doesn't call retrieve and embed_queries fails, returns empty results."""
+        mock_agent_result = MagicMock()
+        mock_agent_result.output = "I could not process that"
+        mock_agent_result.usage.return_value = _mock_usage()
+        mock_agent_result.all_messages.return_value = []
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(return_value=mock_agent_result)
+
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch(
+                "app.services.agent.embedding.embed_queries",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("Embedding API down"),
+            ),
+        ):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            result = await agentic_search(request)
+
+        assert isinstance(result, SearchResponse)
+        assert result.documents == [[]]
+
+    async def test_retrieve_accumulates_results_across_retries(self):
+        """When agent calls retrieve twice, results from both calls are accumulated."""
+        first_results = [
+            RetrievalResult(texts=["doc1"], metadatas=[{"src": "a"}], distances=[0.9])
+        ]
+        second_results = [
+            RetrievalResult(texts=["doc2"], metadatas=[{"src": "b"}], distances=[0.8])
+        ]
+
+        call_count = 0
+
+        async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            nonlocal call_count
+            # Simulate two retrieve calls by building up full_results
+            deps.full_results = (deps.full_results or []) + first_results
+            deps.full_results = (deps.full_results or []) + second_results
+            call_count += 1
+            mock_result = MagicMock()
+            mock_result.output = "done"
+            mock_result.usage.return_value = _mock_usage()
+            mock_result.all_messages.return_value = []
+            return mock_result
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        with patch("app.services.agent._get_agent", return_value=mock_agent):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=10)
+            result = await agentic_search(request)
+
+        assert "doc1" in result.documents[0]
+        assert "doc2" in result.documents[0]
+
+
+class TestParseFallbackQueries:
+    def test_mistral_tool_calls_with_trailing_text(self):
+        """Greedy regex fix: trailing text after JSON should not break parsing."""
+        output = '[TOOL_CALLS]retrieve{"queries": ["test query"]} some trailing text'
+        result = _parse_fallback_queries(output)
+        assert result == ["test query"]
+
+    def test_plain_json(self):
+        output = '{"queries": ["q1", "q2"]}'
+        result = _parse_fallback_queries(output)
+        assert result == ["q1", "q2"]
+
+    def test_no_queries(self):
+        output = "I cannot help with that."
+        result = _parse_fallback_queries(output)
+        assert result is None
