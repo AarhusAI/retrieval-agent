@@ -1,7 +1,5 @@
 # Agentic Retrieval Service
 
-> **Replaces `retrieval-service`**
-
 Agentic retrieval microservice for [Open WebUI](https://github.com/open-webui/open-webui). Wraps RAG document search in
 an LLM-driven reasoning loop — adding query rewriting, decomposition, and corrective relevance grading with retry. Falls
 back to a traditional linear pipeline when agentic mode is disabled.
