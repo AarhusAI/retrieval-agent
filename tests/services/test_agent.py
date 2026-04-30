@@ -1,9 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
     AgentDeps,
     RetrievalResult,
+    _build_previews,
     _dedup_results,
     _parse_fallback_queries,
     agentic_search,
@@ -218,6 +220,105 @@ class TestAgenticSearch:
 
         assert "doc1" in result.documents[0]
         assert "doc2" in result.documents[0]
+
+
+class TestBuildPreviews:
+    def test_caps_at_preview_k(self):
+        """Preview output is bounded by preview_k regardless of input size."""
+        all_results = [
+            RetrievalResult(
+                texts=[f"doc{i}" for i in range(15)],
+                metadatas=[{"source": f"s{i}"} for i in range(15)],
+                distances=[1.0 - i * 0.01 for i in range(15)],
+            )
+        ]
+        previews = _build_previews(all_results, max_chars=200, preview_k=5)
+        assert len(previews) == 1
+        assert len(previews[0].texts) == 5
+        assert previews[0].texts == ["doc0", "doc1", "doc2", "doc3", "doc4"]
+
+    def test_dedups_across_queries_within_preview_k(self):
+        """Duplicates across queries don't consume preview_k slots twice."""
+        all_results = [
+            RetrievalResult(texts=["a", "b"], metadatas=[{}, {}], distances=[0.9, 0.8]),
+            RetrievalResult(texts=["a", "c"], metadatas=[{}, {}], distances=[0.95, 0.7]),
+        ]
+        previews = _build_previews(all_results, max_chars=200, preview_k=10)
+        assert previews[0].texts == ["a", "b", "c"]
+
+    def test_truncates_long_text(self):
+        all_results = [
+            RetrievalResult(texts=["x" * 500], metadatas=[{"source": "s"}], distances=[0.9])
+        ]
+        previews = _build_previews(all_results, max_chars=50, preview_k=5)
+        assert previews[0].texts[0] == "x" * 50 + "..."
+
+    def test_metadata_reduced_to_source(self):
+        """Previews only carry source — full metadata stays in deps.full_results."""
+        all_results = [
+            RetrievalResult(
+                texts=["t"],
+                metadatas=[{"source": "doc.pdf", "page": 7, "score": 0.99}],
+                distances=[0.9],
+            )
+        ]
+        previews = _build_previews(all_results, max_chars=200, preview_k=5)
+        assert previews[0].metadatas == [{"source": "doc.pdf"}]
+
+
+class TestAgentRecallDecoupling:
+    async def test_fetch_k_uses_agent_fetch_k_not_request_k(self):
+        """The agent's candidate pool is agent_fetch_k, not request.k.
+
+        Open WebUI sends k=3, but the agent should still grade against a
+        wide candidate pool so the relevant chunk isn't filtered out before
+        the LLM ever sees it.
+        """
+        captured_deps: list[AgentDeps] = []
+
+        async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            captured_deps.append(deps)
+            deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+            mock_result = MagicMock()
+            mock_result.output = "done"
+            mock_result.usage.return_value = _mock_usage()
+            mock_result.all_messages.return_value = []
+            return mock_result
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        with patch("app.services.agent._get_agent", return_value=mock_agent):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=3)
+            await agentic_search(request)
+
+        assert len(captured_deps) == 1
+        assert captured_deps[0].k == 3
+        assert captured_deps[0].fetch_k == settings.agent_fetch_k
+        assert captured_deps[0].fetch_k > 3
+
+    async def test_conversation_history_is_capped(self):
+        """Only the last N messages reach the agent's user prompt."""
+        mock_result = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+        mock_agent = _make_mock_agent(mock_result)
+
+        n = settings.agent_conversation_history_messages
+        old_messages = [ChatMessage(role="user", content=f"OLD_MSG_{i}") for i in range(10)]
+        recent_messages = [ChatMessage(role="user", content=f"RECENT_MSG_{i}") for i in range(n)]
+
+        with patch("app.services.agent._get_agent", return_value=mock_agent):
+            request = SearchRequest(
+                messages=old_messages + recent_messages,
+                collection_names=["coll1"],
+                k=3,
+            )
+            await agentic_search(request)
+
+        prompt = mock_agent.run.call_args[0][0]
+        for i in range(10):
+            assert f"OLD_MSG_{i}" not in prompt
+        for i in range(n):
+            assert f"RECENT_MSG_{i}" in prompt
 
 
 class TestParseFallbackQueries:

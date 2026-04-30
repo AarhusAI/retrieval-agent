@@ -205,32 +205,11 @@ def _build_agent() -> Agent[AgentDeps, str]:
         # Accumulate full results across retries (dedup happens downstream)
         ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
 
-        # Dedup across queries and build minimal previews for the LLM.
-        # Full metadata is preserved in deps.full_results — previews only
-        # include source name to save context window tokens.
-        max_chars = settings.agent_tool_preview_chars
-        seen: set[str] = set()
-        preview_texts: list[str] = []
-        preview_sources: list[str] = []
-        preview_distances: list[float] = []
-
-        for r in all_results:
-            for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
-                text_hash = hashlib.md5(text.encode()).hexdigest()
-                if text_hash in seen:
-                    continue
-                seen.add(text_hash)
-                preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
-                preview_sources.append(meta.get("source", ""))
-                preview_distances.append(dist)
-
-        return [
-            RetrievalResult(
-                texts=preview_texts,
-                metadatas=[{"source": s} for s in preview_sources],
-                distances=preview_distances,
-            )
-        ]
+        return _build_previews(
+            all_results,
+            max_chars=settings.agent_tool_preview_chars,
+            preview_k=settings.agent_preview_k,
+        )
 
     return agent
 
@@ -290,6 +269,46 @@ def _parse_fallback_queries(output: str) -> list[str] | None:
     return None
 
 
+def _build_previews(
+    all_results: list[RetrievalResult],
+    *,
+    max_chars: int,
+    preview_k: int,
+) -> list[RetrievalResult]:
+    """Build the deduped, truncated, capped preview list returned to the LLM.
+
+    Full results stay in AgentDeps.full_results (used by the final response);
+    previews are bounded by preview_k to keep the agent's context window
+    under control across iterations.
+    """
+    seen: set[str] = set()
+    preview_texts: list[str] = []
+    preview_sources: list[str] = []
+    preview_distances: list[float] = []
+
+    for r in all_results:
+        if len(preview_texts) >= preview_k:
+            break
+        for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            if text_hash in seen:
+                continue
+            seen.add(text_hash)
+            preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
+            preview_sources.append(meta.get("source", ""))
+            preview_distances.append(dist)
+            if len(preview_texts) >= preview_k:
+                break
+
+    return [
+        RetrievalResult(
+            texts=preview_texts,
+            metadatas=[{"source": s} for s in preview_sources],
+            distances=preview_distances,
+        )
+    ]
+
+
 def _dedup_results(
     results: list[RetrievalResult], k: int
 ) -> tuple[list[str], list[dict], list[float]]:
@@ -330,9 +349,10 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         return SearchResponse(documents=[], metadatas=[], distances=[])
 
     k = request.k
-    fetch_k = k
-    if settings.enable_reranking:
-        fetch_k = k * settings.initial_retrieval_multiplier
+    # fetch_k is the agent's internal candidate pool, decoupled from the
+    # user-facing k. The wide pool feeds RRF / grading; final response is
+    # still trimmed to k by _dedup_results.
+    fetch_k = settings.agent_fetch_k
 
     agent = _get_agent()
     deps = AgentDeps(
@@ -342,7 +362,8 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     )
 
     if request.messages:
-        conversation = "\n".join(f"{m.role}: {m.content}" for m in request.messages)
+        recent = request.messages[-settings.agent_conversation_history_messages :]
+        conversation = "\n".join(f"{m.role}: {m.content}" for m in recent)
         user_prompt = (
             f"Analyze the following conversation and find the most relevant "
             f"documents for the user's latest information need.\n\n"
@@ -373,9 +394,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
             timeout=settings.agent_timeout,
         )
     except TimeoutError:
-        log.warning(
-            "Agent timed out after %ds, returning partial results", settings.agent_timeout
-        )
+        log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
         retrieval_results = deps.full_results or []
         texts, metadatas, distances = _dedup_results(retrieval_results, k)
         return SearchResponse(

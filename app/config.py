@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     agent_strict_tools: bool = True
     agent_timeout: int = 60
     agent_system_prompt: str = ""
+    # Agentic recall (decoupled from request.k to widen recall without
+    # blowing the agent LLM's context window).
+    agent_fetch_k: int = 20
+    agent_preview_k: int = 5
+    agent_conversation_history_messages: int = 4
 
     # Debug
     debug: bool = False
