@@ -253,17 +253,71 @@ class TestBuildPreviews:
         previews = _build_previews(all_results, max_chars=50, preview_k=5)
         assert previews[0].texts[0] == "x" * 50 + "..."
 
-    def test_metadata_reduced_to_source(self):
-        """Previews only carry source — full metadata stays in deps.full_results."""
+    def test_metadata_carries_structural_fields(self):
+        """Previews carry source + page + headers + collection_type as structured
+        fields so the retrieval-specialist agent can grade relevance against
+        section/page signals. Non-whitelisted fields stay in deps.full_results.
+        """
         all_results = [
             RetrievalResult(
                 texts=["t"],
-                metadatas=[{"source": "doc.pdf", "page": 7, "score": 0.99}],
+                metadatas=[
+                    {
+                        "source": "doc.pdf",
+                        "page": 7,
+                        "headers": ["Privacy", "Foundational Principles"],
+                        "collection_type": "file",
+                        # Anything outside the whitelist is dropped from previews.
+                        "score": 0.99,
+                        "file_id": "abc-123",
+                        "user_id": "u-1",
+                    }
+                ],
                 distances=[0.9],
             )
         ]
         previews = _build_previews(all_results, max_chars=200, preview_k=5)
-        assert previews[0].metadatas == [{"source": "doc.pdf"}]
+        assert previews[0].metadatas == [
+            {
+                "source": "doc.pdf",
+                "page": 7,
+                "headers": ["Privacy", "Foundational Principles"],
+                "collection_type": "file",
+            }
+        ]
+
+    def test_metadata_omits_missing_optional_fields(self):
+        """Optional fields are dropped when absent, ``None``, ``""``, or ``[]`` —
+        the agent shouldn't burn context on ``"headers": []`` noise. Numeric
+        zero is kept (it's a valid value; our writers shouldn't emit it for
+        page indices, but if they do we want it visible)."""
+        all_results = [
+            RetrievalResult(
+                texts=["t1", "t2", "t3"],
+                metadatas=[
+                    # Plain-text mode chunk — no structural fields.
+                    {"source": "a.pdf"},
+                    # Explicit empty / None — should be filtered.
+                    {"source": "b.md", "headers": [], "page": None},
+                    # Mixed: collection_type kept, headers/page absent → dropped.
+                    {"source": "c.pdf", "collection_type": "memory"},
+                ],
+                distances=[0.9, 0.8, 0.7],
+            )
+        ]
+        previews = _build_previews(all_results, max_chars=200, preview_k=5)
+        assert previews[0].metadatas == [
+            {"source": "a.pdf"},
+            {"source": "b.md"},
+            {"source": "c.pdf", "collection_type": "memory"},
+        ]
+
+    def test_metadata_keeps_source_even_when_blank(self):
+        """source is the only field every preview must carry — matches the
+        previous contract so consumers can rely on ``meta["source"]`` existing."""
+        all_results = [RetrievalResult(texts=["t"], metadatas=[{}], distances=[0.9])]
+        previews = _build_previews(all_results, max_chars=200, preview_k=5)
+        assert previews[0].metadatas == [{"source": ""}]
 
 
 class TestAgentRecallDecoupling:

@@ -89,6 +89,11 @@ documents relate to the query at all). Rewrite the query to be more specific \
 and try again (up to {max_iterations} attempts total). Do not retry just \
 because the answer is not explicitly stated — relevant context is enough.
 
+When grading relevance, use any structural metadata each result exposes — \
+``headers`` (the section/heading breadcrumb a chunk sits under) and ``page`` \
+(page number in the source document) are strong topical signals even when \
+the chunk's body text is terse or generic.
+
 Keep queries concise and focused. Prefer a single well-crafted query over \
 multiple overlapping ones.\
 """
@@ -207,6 +212,35 @@ def _parse_fallback_queries(output: str) -> list[str] | None:
     return None
 
 
+_PREVIEW_META_FIELDS: tuple[str, ...] = ("source", "page", "headers", "collection_type")
+
+
+def _preview_meta(meta: dict) -> dict:
+    """Pick the subset of chunk metadata the retrieval-specialist agent sees.
+
+    Structural fields (``page``, ``headers``) help the agent grade relevance —
+    e.g. a chunk under ``headers=["Privacy", "Foundational Principles"]`` is
+    a strong topical signal even when the body text is vague. ``source`` and
+    ``collection_type`` ground the chunk's provenance.
+
+    Missing / empty / falsy values are dropped so the LLM doesn't burn context
+    on ``"page": null`` or ``"headers": []``. The full meta still flows
+    through ``deps.full_results`` to the final ``SearchResponse``; this is
+    purely about what the agent sees mid-loop.
+    """
+    out: dict = {}
+    for key in _PREVIEW_META_FIELDS:
+        value = meta.get(key)
+        if value in (None, "", [], {}):
+            continue
+        out[key] = value
+    # ``source`` is the only field every preview should carry — keep an empty
+    # string if it wasn't set, matching the previous contract.
+    if "source" not in out:
+        out["source"] = ""
+    return out
+
+
 def _build_previews(
     all_results: list[RetrievalResult],
     *,
@@ -217,11 +251,13 @@ def _build_previews(
 
     Full results stay in AgentDeps.full_results (used by the final response);
     previews are bounded by preview_k to keep the agent's context window
-    under control across iterations.
+    under control across iterations. Each preview carries ``source`` plus
+    any structural fields (``page``, ``headers``, ``collection_type``) the
+    chunk has — see ``_preview_meta``.
     """
     seen: set[str] = set()
     preview_texts: list[str] = []
-    preview_sources: list[str] = []
+    preview_metas: list[dict] = []
     preview_distances: list[float] = []
 
     for r in all_results:
@@ -233,7 +269,7 @@ def _build_previews(
                 continue
             seen.add(text_hash)
             preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
-            preview_sources.append(meta.get("source", ""))
+            preview_metas.append(_preview_meta(meta))
             preview_distances.append(dist)
             if len(preview_texts) >= preview_k:
                 break
@@ -241,7 +277,7 @@ def _build_previews(
     return [
         RetrievalResult(
             texts=preview_texts,
-            metadatas=[{"source": s} for s in preview_sources],
+            metadatas=preview_metas,
             distances=preview_distances,
         )
     ]
