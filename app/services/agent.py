@@ -89,10 +89,12 @@ documents relate to the query at all). Rewrite the query to be more specific \
 and try again (up to {max_iterations} attempts total). Do not retry just \
 because the answer is not explicitly stated — relevant context is enough.
 
-When grading relevance, use any structural metadata each result exposes — \
-``headers`` (the section/heading breadcrumb a chunk sits under) and ``page`` \
-(page number in the source document) are strong topical signals even when \
-the chunk's body text is terse or generic.
+When grading relevance, use any structural or descriptive metadata each \
+result exposes — ``title`` (the document's own title), ``headers`` (the \
+section/heading breadcrumb a chunk sits under), ``page`` (page number in \
+the source document), and ``languages`` (detected language codes — useful \
+to spot language mismatches between user query and result) are strong \
+topical signals even when the chunk's body text is terse or generic.
 
 Keep queries concise and focused. Prefer a single well-crafted query over \
 multiple overlapping ones.\
@@ -212,7 +214,14 @@ def _parse_fallback_queries(output: str) -> list[str] | None:
     return None
 
 
-_PREVIEW_META_FIELDS: tuple[str, ...] = ("source", "page", "headers", "collection_type")
+_PREVIEW_META_FIELDS: tuple[str, ...] = (
+    "source",
+    "title",
+    "page",
+    "headers",
+    "languages",
+    "collection_type",
+)
 
 
 def _preview_meta(meta: dict) -> dict:
@@ -221,7 +230,9 @@ def _preview_meta(meta: dict) -> dict:
     Structural fields (``page``, ``headers``) help the agent grade relevance —
     e.g. a chunk under ``headers=["Privacy", "Foundational Principles"]`` is
     a strong topical signal even when the body text is vague. ``source`` and
-    ``collection_type`` ground the chunk's provenance.
+    ``collection_type`` ground the chunk's provenance. ``title`` (the
+    document's own title from extractor metadata) and ``languages`` (detected
+    language codes) are extra topical and language-match signals.
 
     Missing / empty / falsy values are dropped so the LLM doesn't burn context
     on ``"page": null`` or ``"headers": []``. The full meta still flows

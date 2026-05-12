@@ -254,9 +254,10 @@ class TestBuildPreviews:
         assert previews[0].texts[0] == "x" * 50 + "..."
 
     def test_metadata_carries_structural_fields(self):
-        """Previews carry source + page + headers + collection_type as structured
-        fields so the retrieval-specialist agent can grade relevance against
-        section/page signals. Non-whitelisted fields stay in deps.full_results.
+        """Previews carry source + title + page + headers + languages +
+        collection_type as structured fields so the retrieval-specialist agent
+        can grade relevance against section/page/title/language signals.
+        Non-whitelisted fields stay in deps.full_results.
         """
         all_results = [
             RetrievalResult(
@@ -264,13 +265,17 @@ class TestBuildPreviews:
                 metadatas=[
                     {
                         "source": "doc.pdf",
+                        "title": "Privacy by Design",
                         "page": 7,
                         "headers": ["Privacy", "Foundational Principles"],
+                        "languages": ["en", "da"],
                         "collection_type": "file",
                         # Anything outside the whitelist is dropped from previews.
                         "score": 0.99,
                         "file_id": "abc-123",
                         "user_id": "u-1",
+                        "authors": ["Fred Carter"],  # in Qdrant payload, not in preview
+                        "created_at": "2010-11-02T15:06:47Z",  # same
                     }
                 ],
                 distances=[0.9],
@@ -280,8 +285,10 @@ class TestBuildPreviews:
         assert previews[0].metadatas == [
             {
                 "source": "doc.pdf",
+                "title": "Privacy by Design",
                 "page": 7,
                 "headers": ["Privacy", "Foundational Principles"],
+                "languages": ["en", "da"],
                 "collection_type": "file",
             }
         ]
