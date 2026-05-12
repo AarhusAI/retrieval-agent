@@ -177,7 +177,7 @@ class TestAgenticSearch:
         with (
             patch("app.services.agent._get_agent", return_value=mock_agent),
             patch(
-                "app.services.agent.embedding.embed_queries",
+                "app.services.pipeline.embedding.embed_queries",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("Embedding API down"),
             ),

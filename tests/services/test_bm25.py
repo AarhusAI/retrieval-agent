@@ -63,13 +63,13 @@ class TestReciprocalRankFusion:
 
 class TestBm25Cache:
     async def test_cache_prevents_repeated_scrolls(self):
-        """Second call to bm25_search with same collection should use cached index."""
+        """Second call to bm25_search with same collection set should use cached index."""
         mock_docs = [("id1", "hello world"), ("id2", "foo bar")]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
-            result1 = await bm25_search("test-coll", "hello", k=2)
-            result2 = await bm25_search("test-coll", "foo", k=2)
+            result1 = await bm25_search(["test-coll"], "hello", k=2)
+            result2 = await bm25_search(["test-coll"], "foo", k=2)
 
         # scroll should only be called once (cached on second call)
         assert mock_scroll.call_count == 1
@@ -78,16 +78,28 @@ class TestBm25Cache:
 
     async def test_empty_collection_returns_empty(self):
         with patch("app.services.bm25.scroll_collection_texts", return_value=[]):
-            result = await bm25_search("empty-coll", "hello", k=2)
+            result = await bm25_search(["empty-coll"], "hello", k=2)
 
         assert result == []
 
-    async def test_different_collections_have_separate_caches(self):
+    async def test_different_collection_sets_have_separate_caches(self):
         mock_docs = [("id1", "hello world")]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
-            await bm25_search("coll-a", "hello", k=2)
-            await bm25_search("coll-b", "hello", k=2)
+            await bm25_search(["coll-a"], "hello", k=2)
+            await bm25_search(["coll-b"], "hello", k=2)
 
         assert mock_scroll.call_count == 2
+
+    async def test_cache_key_is_order_independent(self):
+        """Same collection set in different orders hits the same cache entry."""
+        mock_docs = [("id1", "hello world")]
+        with patch(
+            "app.services.bm25.scroll_collection_texts", return_value=mock_docs
+        ) as mock_scroll:
+            await bm25_search(["coll-a", "coll-b"], "hello", k=2)
+            await bm25_search(["coll-b", "coll-a"], "hello", k=2)
+
+        # Sorted-tuple key — both calls land in the same cache entry
+        assert mock_scroll.call_count == 1

@@ -2,5 +2,11 @@
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": false
+  },
+  "permissions": {
+    "allow": [
+      "Read(//home/cableman/source/work/ai/aarhusai/openwebui-docker/**)",
+      "Bash(docker compose *)"
+    ]
   }
 }

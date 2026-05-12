@@ -38,7 +38,7 @@ FastAPI app wired in `app/main.py` (lifespan, health probes, router include). En
 
 `search()` routes to one of two pipelines based on `ENABLE_AGENTIC_RAG`. Both share the same retrieval primitives (embedding, Qdrant, BM25, reranking) — the difference is whether an LLM drives the loop.
 
-**Linear pipeline** (`linear_search`): query resolution → embed → vector search across collections concurrently → optional BM25 RRF fusion → optional cross-encoder rerank → dedup by MD5 → top-k. See `README.md` for the diagram.
+**Linear pipeline** (`linear_search`): query resolution → embed (dense + optional sparse) → single Qdrant query per dense query, scoped to all `collection_names` via a `meta.collection_name IN (...)` filter → optional hybrid fusion (see below) → optional cross-encoder rerank → dedup by MD5 → top-k. See `README.md` for the diagram. The pre-Phase-3 per-collection `asyncio.gather` is gone — one logical query is one Qdrant call.
 
 **Agentic pipeline** (`app/services/agent.py`): a PydanticAI `Agent` with a `retrieve` tool wrapping the same primitives. The agent generates 1-2 queries, calls the tool, accepts results if any document is on-topic, and only retries with rewritten queries when results are completely off-topic (bounded by `AGENT_MAX_ITERATIONS`).
 
@@ -48,11 +48,26 @@ Three pieces of agent behaviour worth knowing because they are not obvious from 
 - **Fallback parser.** If the agent emits queries as text instead of calling the tool, `_parse_fallback_queries()` (`app/services/agent.py`) extracts them — handles plain JSON and Mistral `[TOOL_CALLS]` syntax. Wrapped in exception handling: embedding/Qdrant failures inside the fallback return empty results, not 500s.
 - **Timeout & accumulation.** `AGENT_TIMEOUT` is wall-clock. On timeout, whatever the `retrieve` tool already wrote to `AgentDeps.full_results` is returned. Multiple `retrieve` calls (corrective retries) **append** to `full_results`; they don't overwrite.
 
-When reranking is enabled, initial retrieval fetches `k * INITIAL_RETRIEVAL_MULTIPLIER` candidates. All GPU/LLM services (embedding, reranking, agent) are external OpenAI-compatible APIs — no local models.
+When reranking is enabled, initial retrieval fetches `k * INITIAL_RETRIEVAL_MULTIPLIER` candidates. The agent path uses `AGENT_FETCH_K` instead — decoupled from `request.k` so a small Open WebUI `top_k` doesn't starve the grading pool; only `AGENT_PREVIEW_K` of those are previewed to the LLM. Dense embedding, reranker, and agent LLM are external OpenAI-compatible APIs; **sparse embedding runs in-process** via fastembed (see below).
 
-### Qdrant Multitenancy Mapping
+### Qdrant Schema (Phase 3 — single collection)
 
-`_get_collection_and_tenant_id()` in `app/services/qdrant.py` mirrors Open WebUI's `qdrant_multitenancy.py` exactly: collection names like `user-memory-*`, `file-*`, `web-search-*`, hex-hash, and knowledge collections are routed to shared Qdrant collections with tenant filters. **If upstream changes that mapping, this service breaks silently** — vector search will hit the wrong collection or filter on the wrong tenant. Re-check this function any time the Open WebUI fork is bumped.
+All retrievable data lives in **one physical Qdrant collection** named by `QDRANT_INDEX` (default `ingestion_files`), populated by a separate external **ingestion service** that writes the Haystack-native `qdrant-haystack` schema:
+
+- Chunk text at `payload.content`
+- Metadata at `payload.meta.*`, with `meta.collection_name` carrying Open WebUI's logical collection identifier (e.g. `file-…`, `user-memory-…`, knowledge collection IDs)
+- Dense vector under the named vector `text-dense`; sparse vector (when present) under `text-sparse`
+
+`vector_search` in `app/services/qdrant.py` issues a single Qdrant query filtered by `meta.collection_name MatchAny (collection_names)`. The pre-Phase-3 multitenancy mapping (`_get_collection_and_tenant_id`, `qdrant_multitenancy.py` mirror, per-class shared collections, `tenant_id` filter, `QDRANT_COLLECTION_PREFIX`, `QDRANT_MULTITENANCY`) has been **removed entirely** — don't reintroduce that vocabulary. The contract is now with the ingestion service's schema, not with Open WebUI's `qdrant_multitenancy.py`.
+
+### Hybrid Search (two paths)
+
+`ENABLE_HYBRID_SEARCH=true` selects one of two fusion paths based on a runtime capability probe (`qdrant.has_sparse_vectors()`, cached for the process lifetime once a definite answer is obtained):
+
+- **Native server-side** — when `text-sparse` exists on the configured collection. `app/services/sparse_embedding.py` runs `fastembed` in-process (default model `Qdrant/bm42-all-minilm-l6-v2-attentions`) to produce a sparse query vector; Qdrant's Query API does prefetch on both `text-dense` and `text-sparse` then RRF-fuses server-side. The sparse model is preloaded in the FastAPI lifespan when applicable so the first query doesn't pay the download/import cost. Set `SPARSE_QUERY_PROVIDER=none` to disable the sparse stage and force dense-only here.
+- **Client-side BM25 fallback** — when the collection has no `text-sparse` vector. `app/services/bm25.py` scrolls the (filtered) Qdrant content into an in-memory BM25 index keyed on the **sorted tuple of `collection_names`** (different orderings share a cache entry), then `reciprocal_rank_fusion()` weights it with `HYBRID_BM25_WEIGHT`.
+
+The two paths are mutually exclusive per call — the native path already RRF-fuses, so client-side fusion never runs on top of it (that would double-rank).
 
 ### Testing
 
@@ -63,9 +78,11 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. `tests/conftest.py` set
 All config via environment variables, loaded by pydantic-settings in `app/config.py`. See `.env.example` and `README.md` for the full list and defaults. The settings that matter beyond their docstrings — because they are **contracts with other systems**, not knobs:
 
 - `API_KEY` must equal Open WebUI's `RAG_EXTERNAL_RETRIEVAL_API_KEY`.
-- `EMBEDDING_MODEL` and especially `EMBEDDING_QUERY_PREFIX` must match Open WebUI's RAG config exactly. The prefix is applied to query strings in `app/services/embedding.py` before embedding; if it doesn't match what indexing used, vector search returns garbage. Note: query-generation output is not re-prefixed — the embedding stage adds the prefix, not the LLM.
-- `QDRANT_MULTITENANCY` must match Open WebUI's setting (see Qdrant Multitenancy Mapping above).
+- `EMBEDDING_MODEL` and `EMBEDDING_PREFIX_QUERY` must match what the **ingestion service** used at index time (for e5: `"query: "` on queries, `"passage: "` on documents; bge-m3 uses no prefix). The prefix is applied in `app/services/embedding.py` before embedding; mismatch → vector search returns garbage. Query-generation output is not re-prefixed — the embedding stage adds the prefix, not the LLM. (Note: this setting was renamed from the older `EMBEDDING_QUERY_PREFIX`.)
+- `QDRANT_INDEX` is the single physical collection written by the ingestion service. There is no longer a `QDRANT_MULTITENANCY` / `QDRANT_COLLECTION_PREFIX` to coordinate with Open WebUI.
+- `SPARSE_QUERY_MODEL` must match the sparse model the ingestion service used for indexing (no contract enforcement — just garbage out otherwise). `SPARSE_QUERY_PROVIDER=none` cleanly disables the sparse stage while keeping hybrid semantics intact.
 - `AGENT_*` (`AGENT_MODEL`, `AGENT_API_BASE_URL`, `AGENT_API_KEY`, etc.) drives both the agentic loop and the linear pipeline's query generation. Defaults to the LiteLLM proxy at `http://litellm:4000/v1`. Use a small/fast model.
+- `AGENT_FETCH_K` / `AGENT_PREVIEW_K` / `AGENT_CONVERSATION_HISTORY_MESSAGES` — agentic-recall knobs decoupled from `request.k`. Widen `FETCH_K` to feed the grader more candidates without inflating the LLM context; `PREVIEW_K` caps what the `retrieve` tool actually returns to the agent.
 - `RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE` — optional override for the query-generation prompt (built-in prompt is used when empty).
 - `AGENT_SYSTEM_PROMPT` — same idea for the agent loop.
 - `AGENT_STRICT_TOOLS` — disable for models that don't support PydanticAI strict tool definitions (combine with the fallback parser).
@@ -78,7 +95,16 @@ All config via environment variables, loaded by pydantic-settings in `app/config
 
 ## Failure-mode notes
 
-- **BM25 scrolls entire collections** from Qdrant — only viable for small ones. The result is cached in-memory for `BM25_CACHE_TTL_SECONDS` (default 300s) to avoid re-scrolling on every query.
+- **BM25 scrolls entire collections** from Qdrant — only viable for small scopes. Only runs in the client-side fallback hybrid path (collection without `text-sparse`). Cached in-memory keyed on the sorted tuple of collection names for `BM25_CACHE_TTL_SECONDS` (default 300s).
 - **Reranker fails open**: HTTP/connection errors fall back to unranked results — a missing reranker won't take down search. Treat this as deliberate.
 - **Qdrant errors are loud on purpose**: `vector_search` catches only `UnexpectedResponse` (e.g. collection not found). Connection errors and auth failures propagate as 500s so they're visible.
+- **Sparse capability is detected once.** `has_sparse_vectors()` caches the answer for the process lifetime. If the collection is recreated with a different vector config, call `reset_sparse_capability()` or restart the service — otherwise the wrong hybrid path keeps running. Cold-start before any ingest is the one case the cache deliberately skips (returns `False` without caching so first post-ingest query re-detects).
 - The agentic loop is bounded by both `AGENT_MAX_ITERATIONS` (per-loop iterations) and `AGENT_TIMEOUT` (hard wall-clock). Tool results accumulate across iterations in the conversation history — watch the agent model's context window.
+
+## `scripts/` — eval analysis (not in tests/)
+
+Standalone CLIs for inspecting [promptfoo](https://promptfoo.dev/) eval JSON output and probing the reranker — not wired into `task` or pytest, run them directly:
+
+- `scripts/eval_diff.py before.json after.json [--metric ...]` — diff two promptfoo runs by metric, grouped by source document. Default metric is `contentRetrieval`. Skips `difficulty: impossible` and `refusal: yes` tests unless flags say otherwise.
+- `scripts/show_failures.py eval.json` — show failing tests with question, expected snippets, bot response, and retrieved sources. Same default skips as `eval_diff.py`.
+- `scripts/rerank_check.py rank|truncate ...` — hit the configured `/v1/rerank` endpoint with a query + candidates (rank mode) or the same content at growing prefix lengths to probe tokenizer-level truncation (truncate mode). Reads `RERANKER_*` env vars; source `.env` first.

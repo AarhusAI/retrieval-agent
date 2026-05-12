@@ -40,6 +40,7 @@ async def close_client() -> None:
         await _client.close()
         _client = None
 
+
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """\
 ### Task:
 Analyze the chat history and generate 1-3 search queries optimized for \
