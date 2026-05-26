@@ -94,10 +94,12 @@ async def health_ready():
         qdrant.get_client().get_collections()
         return {"status": "ok"}
     except Exception as exc:
+        # Log full exception server-side; surface only a generic status to
+        # callers to avoid leaking internal hostnames/ports.
         log.warning("Readiness check failed: %s", exc)
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "detail": str(exc)},
+            content={"status": "error"},
         )
 
 

@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     enable_hybrid_search: bool = False
     hybrid_bm25_weight: float = 0.3
     bm25_cache_ttl_seconds: int = 300
+    # Hard cap on documents pulled into the in-memory BM25 index per
+    # collection scope. Protects the process from OOM when a logical
+    # collection has unexpectedly grown.
+    bm25_max_docs: int = 10_000
 
     # Sparse query embedder (used when hybrid is enabled and the configured
     # Qdrant collection has a sparse named vector). Must match the model the

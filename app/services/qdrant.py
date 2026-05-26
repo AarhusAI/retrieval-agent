@@ -227,11 +227,14 @@ def scroll_collection_texts(
 
     Returns a list of ``(point_id, text)``. Used by the BM25 fallback path to
     build an in-memory inverted index over the relevant subset of the physical
-    collection — never the whole index.
+    collection — never the whole index. Bounded by ``BM25_MAX_DOCS`` so a
+    runaway logical collection can't OOM the process; if the cap is hit the
+    BM25 index is built on the partial set and a warning is logged.
     """
     client = get_client()
     qdrant_collection = settings.qdrant_index
     sfilter = _collection_name_filter(collection_names)
+    max_docs = settings.bm25_max_docs
 
     results: list[tuple[str, str]] = []
     offset = None
@@ -248,6 +251,14 @@ def scroll_collection_texts(
             text = payload.get("content", "")
             if text:
                 results.append((str(point.id), text))
+            if len(results) >= max_docs:
+                log.warning(
+                    "scroll_collection_texts hit BM25_MAX_DOCS=%d for %s; "
+                    "building BM25 index on partial set",
+                    max_docs,
+                    collection_names,
+                )
+                return results
         if next_offset is None:
             break
         offset = next_offset

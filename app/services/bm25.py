@@ -14,6 +14,7 @@ collection names so multi-collection queries hit the same cache entry.
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
@@ -22,6 +23,12 @@ from app.config import settings
 from app.services.qdrant import scroll_collection_texts
 
 log = logging.getLogger(__name__)
+
+# Hard cap on cached BM25 indexes. An attacker (or a buggy caller) can
+# otherwise grow ``_cache`` and ``_cache_locks`` indefinitely by varying
+# ``collection_names`` sets per request, since each unique sorted tuple is a
+# new entry. FIFO eviction is enough — entries already have a TTL.
+_CACHE_MAX_ENTRIES = 32
 
 
 def _tokenize(text: str) -> list[str]:
@@ -39,8 +46,8 @@ class _CacheEntry:
 # same logical collections share an entry.
 CacheKey = tuple[str, ...]
 
-_cache: dict[CacheKey, _CacheEntry] = {}
-_cache_locks: dict[CacheKey, asyncio.Lock] = {}
+_cache: OrderedDict[CacheKey, _CacheEntry] = OrderedDict()
+_cache_locks: OrderedDict[CacheKey, asyncio.Lock] = OrderedDict()
 
 
 def _make_key(collection_names: list[str]) -> CacheKey:
@@ -83,6 +90,13 @@ async def _get_or_build_index(
         _ids, texts = zip(*docs, strict=True)
         tokenized = [_tokenize(t) for t in texts]
         bm25 = BM25Okapi(tokenized)
+
+        # Evict oldest entries (FIFO) before inserting if at capacity. The
+        # lock dict is evicted in lockstep so it can't grow on its own.
+        while len(_cache) >= _CACHE_MAX_ENTRIES:
+            evicted_key, _ = _cache.popitem(last=False)
+            _cache_locks.pop(evicted_key, None)
+            log.debug("Evicted BM25 cache entry: %s", list(evicted_key))
 
         _cache[key] = _CacheEntry(
             bm25=bm25,
