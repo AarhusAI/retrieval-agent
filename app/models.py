@@ -11,7 +11,9 @@ class SearchRequest(BaseModel):
     messages: list[ChatMessage] | None = None
     collection_names: list[str] = Field(max_length=20)
     k: int = Field(default=5, ge=1)
-    retrieval_query_generation_prompt_template: str | None = None
+    retrieval_query_generation_prompt_template: str | None = Field(
+        default=None, max_length=8000
+    )
 
     @field_validator("queries")
     @classmethod

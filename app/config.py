@@ -1,4 +1,17 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+# Placeholder values that historically shipped in docker-compose defaults.
+# Treat them as misconfiguration and refuse to boot.
+_PLACEHOLDER_API_KEYS = {
+    "",
+    "change_me",
+    "change_me_now",
+    "changeme",
+    "secret",
+    "password",
+}
+_MIN_API_KEY_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -6,6 +19,20 @@ class Settings(BaseSettings):
 
     # Auth
     api_key: str
+
+    @field_validator("api_key")
+    @classmethod
+    def _reject_weak_api_key(cls, v: str) -> str:
+        normalised = v.strip()
+        if normalised.lower() in _PLACEHOLDER_API_KEYS:
+            raise ValueError(
+                "API_KEY is unset or a known placeholder; set a strong value in .env"
+            )
+        if len(normalised) < _MIN_API_KEY_LENGTH:
+            raise ValueError(
+                f"API_KEY must be at least {_MIN_API_KEY_LENGTH} characters"
+            )
+        return v
 
     # Qdrant — single physical collection populated by the ingestion service.
     # The legacy multitenancy mapping (one physical collection per Open WebUI

@@ -1,7 +1,7 @@
 import os
 
 # Override env vars BEFORE any app imports (Settings() runs at import time)
-os.environ["API_KEY"] = "test-api-key"
+os.environ["API_KEY"] = "test-api-key-padded-to-32+chars-aaaa"
 os.environ["EMBEDDING_API_BASE_URL"] = "http://fake-embedding:8080"
 os.environ["EMBEDDING_API_KEY"] = "fake-key"
 os.environ["EMBEDDING_PREFIX_QUERY"] = "query: "
@@ -31,7 +31,7 @@ from app.services import bm25, embedding, qdrant, query_generation, reranker, sp
 # Force settings to match test env. Settings() is instantiated at import time,
 # so attribute reassignment is the only reliable way to override fields when the
 # container's compose env disagrees with what tests expect.
-settings.api_key = "test-api-key"
+settings.api_key = "test-api-key-padded-to-32+chars-aaaa"
 settings.enable_hybrid_search = False
 settings.enable_reranking = False
 settings.enable_agentic_rag = False
@@ -41,7 +41,7 @@ settings.sparse_query_provider = "none"
 
 @pytest.fixture
 def api_headers():
-    return {"Authorization": "Bearer test-api-key"}
+    return {"Authorization": "Bearer test-api-key-padded-to-32+chars-aaaa"}
 
 
 @pytest.fixture

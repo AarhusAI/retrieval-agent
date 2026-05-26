@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from string import Template
 
 import httpx
 from openai import AsyncOpenAI
@@ -56,16 +57,16 @@ meaning of the user's information need.
 - Reformulate conversational references into standalone, self-contained queries.
 - Each query should target a different aspect or angle to maximize retrieval coverage.
 - If the user's message clearly needs no document retrieval \
-(e.g. greetings), return: {{ "queries": [] }}
+(e.g. greetings), return: { "queries": [] }
 - Respond in the same language as the user's messages.
-- Today's date is: {current_date}
+- Today's date is: $current_date
 
 ### Output:
-{{ "queries": ["query1", "query2"] }}
+{ "queries": ["query1", "query2"] }
 
 ### Chat History:
 <chat_history>
-{chat_history}
+$chat_history
 </chat_history>\
 """
 
@@ -79,11 +80,20 @@ def _get_template(override: str | None = None) -> str:
 
 
 def render_template(template: str, messages: list[ChatMessage]) -> str:
-    """Render the query generation template with chat history and date."""
+    """Render the query generation template with chat history and date.
+
+    Uses ``string.Template`` (``$name`` placeholders) instead of
+    ``str.format`` so that an attacker-controlled template (passed through
+    via the request body or env var) cannot reach into Python's attribute
+    machinery — ``str.format`` honours ``{x.__class__.__bases__[0].__subclasses__()}``
+    style expressions and would otherwise let any caller with the bearer
+    walk to ``settings`` and exfiltrate upstream API keys. ``safe_substitute``
+    leaves unknown ``$`` placeholders untouched rather than raising.
+    """
     # Use last 4 messages (matching Open WebUI's {{MESSAGES:END:4}})
     recent = messages[-4:]
     chat_history = "\n".join(f"{m.role}: {m.content}" for m in recent)
-    return template.format(
+    return Template(template).safe_substitute(
         current_date=date.today().isoformat(),
         chat_history=chat_history,
     )
