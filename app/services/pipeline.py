@@ -89,9 +89,7 @@ async def retrieve_one_query(
     if settings.enable_hybrid_search and not use_native_hybrid and texts:
         vector_ranked = list(zip(texts, distances, strict=True))
         bm25_results = await bm25_search(collection_names, query_text, fetch_k)
-        fused = reciprocal_rank_fusion(
-            vector_ranked, bm25_results, settings.hybrid_bm25_weight
-        )
+        fused = reciprocal_rank_fusion(vector_ranked, bm25_results, settings.hybrid_bm25_weight)
         text_to_meta: dict[str, dict] = {}
         for text, meta in zip(texts, metadatas, strict=True):
             if text not in text_to_meta:
@@ -101,9 +99,7 @@ async def retrieve_one_query(
         metadatas = [text_to_meta.get(t, {}) for t in texts]
 
     if settings.enable_reranking and texts and rerank_k is not None:
-        texts, metadatas, distances = await rerank(
-            query_text, texts, metadatas, rerank_k
-        )
+        texts, metadatas, distances = await rerank(query_text, texts, metadatas, rerank_k)
 
     return texts, metadatas, distances
 
@@ -149,7 +145,7 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
         deduped_distances: list[float] = []
 
         for text, meta, dist in zip(merged_texts, merged_metadatas, merged_distances, strict=True):
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
             if text_hash in seen:
                 continue
             seen.add(text_hash)

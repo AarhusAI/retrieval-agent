@@ -138,6 +138,32 @@ tasks:
       - "{{.PYTHON}} pytest --cov=app --cov-report=term-missing -v"
 
   # ==========================================================================
+  # Security audit
+  # ==========================================================================
+  # Both tasks run inside the retrieval container via {{.PYTHON}}, so the
+  # versions of pip-audit / bandit are the ones pinned in pyproject.toml's
+  # dev extras. Rebuild the image (or `task install` into a running
+  # container) after pulling in the dev dependencies — the binaries aren't
+  # on PATH otherwise and the tasks will fail with a clear "command not
+  # found", which is what we want (vs. silently passing on a stale image).
+
+  audit:
+    desc: Run all security audit tools (fails on any finding)
+    cmds:
+      - task: audit:deps
+      - task: audit:code
+
+  audit:deps:
+    desc: Scan declared dependencies for known CVEs (pip-audit)
+    cmds:
+      - "{{.PYTHON}} python -m pip_audit --strict ."
+
+  audit:code:
+    desc: Static security scan of app/ (bandit)
+    cmds:
+      - "{{.PYTHON}} python -m bandit -r app/ -ll"
+
+  # ==========================================================================
   # Code Checks (CI)
   # ==========================================================================
 

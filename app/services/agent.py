@@ -275,7 +275,7 @@ def _build_previews(
         if len(preview_texts) >= preview_k:
             break
         for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
             if text_hash in seen:
                 continue
             seen.add(text_hash)
@@ -305,7 +305,7 @@ def _dedup_results(
 
     for result in results:
         for text, meta, dist in zip(result.texts, result.metadatas, result.distances, strict=True):
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
             if text_hash in seen:
                 continue
             seen.add(text_hash)
