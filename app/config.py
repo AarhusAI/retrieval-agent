@@ -25,13 +25,9 @@ class Settings(BaseSettings):
     def _reject_weak_api_key(cls, v: str) -> str:
         normalised = v.strip()
         if normalised.lower() in _PLACEHOLDER_API_KEYS:
-            raise ValueError(
-                "API_KEY is unset or a known placeholder; set a strong value in .env"
-            )
+            raise ValueError("API_KEY is unset or a known placeholder; set a strong value in .env")
         if len(normalised) < _MIN_API_KEY_LENGTH:
-            raise ValueError(
-                f"API_KEY must be at least {_MIN_API_KEY_LENGTH} characters"
-            )
+            raise ValueError(f"API_KEY must be at least {_MIN_API_KEY_LENGTH} characters")
         return v
 
     # Qdrant — single physical collection populated by the ingestion service.

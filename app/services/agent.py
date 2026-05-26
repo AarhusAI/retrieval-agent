@@ -402,9 +402,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
-        log.warning(
-            "Agent did not call retrieve tool — falling back to direct search."
-        )
+        log.warning("Agent did not call retrieve tool — falling back to direct search.")
         log.debug(
             "Agent fallback output (truncated): %s",
             result.output[:500] if result.output else "(empty)",

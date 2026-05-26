@@ -18,9 +18,7 @@ class SearchRequest(BaseModel):
     messages: list[ChatMessage] | None = Field(default=None, max_length=50)
     collection_names: list[str] = Field(min_length=1, max_length=20)
     k: int = Field(default=5, ge=1, le=100)
-    retrieval_query_generation_prompt_template: str | None = Field(
-        default=None, max_length=8000
-    )
+    retrieval_query_generation_prompt_template: str | None = Field(default=None, max_length=8000)
 
     @field_validator("queries")
     @classmethod
@@ -36,9 +34,7 @@ class SearchRequest(BaseModel):
     def validate_collection_names(cls, v: list[str]) -> list[str]:
         for name in v:
             if not _COLLECTION_NAME_RE.fullmatch(name):
-                raise ValueError(
-                    "collection_names entries must match [A-Za-z0-9_-]{1,128}"
-                )
+                raise ValueError("collection_names entries must match [A-Za-z0-9_-]{1,128}")
         return v
 
     @model_validator(mode="after")
