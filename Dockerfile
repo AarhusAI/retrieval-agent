@@ -1,4 +1,16 @@
-FROM python:3.12-slim AS base
+# Pin the Debian codename explicitly so a future ``slim`` re-alias to a
+# new Debian release doesn't change the base out from under us. Full
+# digest pinning (``python@sha256:...``) belongs in the prod-build CI
+# step where the digest is captured at release time.
+FROM python:3.12-slim-bookworm AS base
+
+# Don't write .pyc files (keeps the image lean) and flush stdout/stderr
+# so container logs surface immediately. PIP_* vars keep the layer cache
+# clean and silence pip's self-update nag in build output.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
