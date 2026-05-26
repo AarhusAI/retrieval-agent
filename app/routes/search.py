@@ -17,10 +17,15 @@ async def search_endpoint(
     _api_key: str = Depends(verify_api_key),
 ) -> SearchResponse:
     log.info(
-        "Search request: queries=%s, messages=%s, collections=%s, k=%d",
-        request.queries,
-        request.messages,
+        "Search request: queries=%d, messages=%d, collections=%s, k=%d",
+        len(request.queries) if request.queries else 0,
+        len(request.messages) if request.messages else 0,
         request.collection_names,
         request.k,
+    )
+    log.debug(
+        "Search request payload: queries=%s, messages=%s",
+        request.queries,
+        request.messages,
     )
     return await search(request)

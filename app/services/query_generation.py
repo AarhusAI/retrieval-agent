@@ -133,7 +133,8 @@ async def generate_queries_from_messages(
         bracket_start = content.find("{")
         bracket_end = content.rfind("}") + 1
         if bracket_start == -1 or bracket_end <= 0:
-            log.warning("No JSON object in query generation response: %s", content)
+            log.warning("No JSON object in query generation response")
+            log.debug("Query generation response payload: %s", content)
             return []
 
         parsed = json.loads(content[bracket_start:bracket_end])
@@ -144,7 +145,8 @@ async def generate_queries_from_messages(
             return []
 
         queries = [q for q in queries if isinstance(q, str) and q.strip()]
-        log.info("Generated %d queries from messages: %s", len(queries), queries)
+        log.info("Generated %d queries from messages", len(queries))
+        log.debug("Generated queries: %s", queries)
         return queries
 
     except Exception:

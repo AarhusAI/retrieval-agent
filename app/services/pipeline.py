@@ -178,14 +178,16 @@ async def _resolve_queries(request: SearchRequest) -> list[str]:
             template_override=request.retrieval_query_generation_prompt_template,
         )
         if queries:
-            log.info("Generated queries from messages: %s", queries)
+            log.info("Generated %d queries from messages", len(queries))
+            log.debug("Generated queries: %s", queries)
 
     if not queries:
         queries = request.queries or []
 
     if not queries and request.messages:
         queries = extract_queries_from_messages(request.messages)
-        log.info("Extracted queries from %d messages: %s", len(request.messages), queries)
+        log.info("Extracted %d queries from %d messages", len(queries), len(request.messages))
+        log.debug("Extracted queries: %s", queries)
 
     return queries
 

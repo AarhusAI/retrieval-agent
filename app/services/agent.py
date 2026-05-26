@@ -134,7 +134,8 @@ def _build_agent() -> Agent[AgentDeps, str]:
 
         Returns documents, metadata, and relevance scores.
         """
-        log.info("Agent tool 'retrieve' called with queries=%s", queries)
+        log.info("Agent tool 'retrieve' called with %d queries", len(queries))
+        log.debug("Agent tool 'retrieve' queries: %s", queries)
         vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
         all_results: list[RetrievalResult] = []
 
@@ -150,7 +151,7 @@ def _build_agent() -> Agent[AgentDeps, str]:
                 use_native_hybrid,
                 rerank_k=ctx.deps.k,
             )
-            log.info("Retrieve for %r: %d documents found", query_text, len(texts))
+            log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
             all_results.append(
                 RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
             )
@@ -377,7 +378,12 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         f"Return up to {k} results."
     )
 
-    log.info("Agentic search: queries=%s, collections=%s", queries, request.collection_names)
+    log.info(
+        "Agentic search: queries=%d, collections=%s",
+        len(queries),
+        request.collection_names,
+    )
+    log.debug("Agentic search queries: %s", queries)
 
     try:
         result = await asyncio.wait_for(
@@ -397,7 +403,10 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
         log.warning(
-            "Agent did not call retrieve tool — falling back to direct search. Agent output: %s",
+            "Agent did not call retrieve tool — falling back to direct search."
+        )
+        log.debug(
+            "Agent fallback output (truncated): %s",
             result.output[:500] if result.output else "(empty)",
         )
         try:
