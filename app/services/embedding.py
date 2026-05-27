@@ -25,7 +25,7 @@ async def close_client() -> None:
 
 async def embed_queries(queries: list[str]) -> list[list[float]]:
     """Embed query texts via OpenAI-compatible API. Applies query prefix before embedding."""
-    prefixed = [f"{settings.embedding_query_prefix}{q}" for q in queries]
+    prefixed = [f"{settings.embedding_prefix_query}{q}" for q in queries]
 
     url = f"{settings.embedding_api_base_url.rstrip('/')}/embeddings"
     payload = {"model": settings.embedding_model, "input": prefixed}

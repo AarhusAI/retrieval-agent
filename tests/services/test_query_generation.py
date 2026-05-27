@@ -146,7 +146,7 @@ class TestGenerateQueriesFromMessages:
     async def test_uses_custom_template(self, monkeypatch):
         monkeypatch.setattr(
             "app.services.query_generation.settings.retrieval_query_generation_prompt_template",
-            "Custom template: {current_date} {chat_history}",
+            "Custom template: $current_date $chat_history",
         )
 
         mock_choice = MagicMock()

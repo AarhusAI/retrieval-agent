@@ -1,6 +1,20 @@
+"""BM25 fallback retrieval.
+
+Used as the hybrid fusion path when ``ENABLE_HYBRID_SEARCH=true`` but the
+target Qdrant collection lacks sparse vectors. When sparse vectors are
+present, retrieval uses Qdrant's native hybrid query API and never enters
+this module.
+
+Builds the BM25 index by scrolling the configured Qdrant collection with the
+new schema (``meta.collection_name IN (collection_names)`` filter, reads
+``payload.content``). Cached in-memory keyed on the sorted tuple of logical
+collection names so multi-collection queries hit the same cache entry.
+"""
+
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
@@ -9,6 +23,12 @@ from app.config import settings
 from app.services.qdrant import scroll_collection_texts
 
 log = logging.getLogger(__name__)
+
+# Hard cap on cached BM25 indexes. An attacker (or a buggy caller) can
+# otherwise grow ``_cache`` and ``_cache_locks`` indefinitely by varying
+# ``collection_names`` sets per request, since each unique sorted tuple is a
+# new entry. FIFO eviction is enough — entries already have a TTL.
+_CACHE_MAX_ENTRIES = 32
 
 
 def _tokenize(text: str) -> list[str]:
@@ -22,14 +42,22 @@ class _CacheEntry:
     expires_at: float
 
 
-_cache: dict[str, _CacheEntry] = {}
-_cache_locks: dict[str, asyncio.Lock] = {}
+# Cache key: sorted tuple of collection names — different orderings of the
+# same logical collections share an entry.
+CacheKey = tuple[str, ...]
+
+_cache: OrderedDict[CacheKey, _CacheEntry] = OrderedDict()
+_cache_locks: OrderedDict[CacheKey, asyncio.Lock] = OrderedDict()
 
 
-def _get_lock(collection_name: str) -> asyncio.Lock:
-    if collection_name not in _cache_locks:
-        _cache_locks[collection_name] = asyncio.Lock()
-    return _cache_locks[collection_name]
+def _make_key(collection_names: list[str]) -> CacheKey:
+    return tuple(sorted(collection_names))
+
+
+def _get_lock(key: CacheKey) -> asyncio.Lock:
+    if key not in _cache_locks:
+        _cache_locks[key] = asyncio.Lock()
+    return _cache_locks[key]
 
 
 def clear_cache() -> None:
@@ -39,22 +67,23 @@ def clear_cache() -> None:
 
 
 async def _get_or_build_index(
-    collection_name: str,
+    collection_names: list[str],
 ) -> tuple[BM25Okapi, tuple[str, ...]] | None:
-    """Get cached BM25 index or build a new one. Returns None for empty collections."""
+    """Get cached BM25 index or build a new one. Returns ``None`` for empty result sets."""
+    key = _make_key(collection_names)
     now = time.monotonic()
-    entry = _cache.get(collection_name)
+    entry = _cache.get(key)
     if entry is not None and entry.expires_at > now:
         return entry.bm25, entry.texts
 
-    lock = _get_lock(collection_name)
+    lock = _get_lock(key)
     async with lock:
         # Double-check after acquiring lock
-        entry = _cache.get(collection_name)
+        entry = _cache.get(key)
         if entry is not None and entry.expires_at > now:
             return entry.bm25, entry.texts
 
-        docs = await asyncio.to_thread(scroll_collection_texts, collection_name)
+        docs = await asyncio.to_thread(scroll_collection_texts, list(key))
         if not docs:
             return None
 
@@ -62,14 +91,21 @@ async def _get_or_build_index(
         tokenized = [_tokenize(t) for t in texts]
         bm25 = BM25Okapi(tokenized)
 
-        _cache[collection_name] = _CacheEntry(
+        # Evict oldest entries (FIFO) before inserting if at capacity. The
+        # lock dict is evicted in lockstep so it can't grow on its own.
+        while len(_cache) >= _CACHE_MAX_ENTRIES:
+            evicted_key, _ = _cache.popitem(last=False)
+            _cache_locks.pop(evicted_key, None)
+            log.debug("Evicted BM25 cache entry: %s", list(evicted_key))
+
+        _cache[key] = _CacheEntry(
             bm25=bm25,
             texts=texts,
             expires_at=now + settings.bm25_cache_ttl_seconds,
         )
         log.info(
             "BM25 index built for %s: %d documents (TTL=%ds)",
-            collection_name,
+            list(key),
             len(texts),
             settings.bm25_cache_ttl_seconds,
         )
@@ -77,16 +113,16 @@ async def _get_or_build_index(
 
 
 async def bm25_search(
-    collection_name: str,
+    collection_names: list[str],
     query: str,
     k: int,
 ) -> list[tuple[str, float]]:
+    """BM25 search across a set of logical collections.
+
+    Returns ``(text, score)`` pairs sorted by score descending. Empty list when
+    the collection set has no documents.
     """
-    BM25 search over all documents in a collection.
-    Returns list of (text, score) sorted by score descending.
-    Uses a TTL-based in-memory cache to avoid rebuilding the index on every query.
-    """
-    result = await _get_or_build_index(collection_name)
+    result = await _get_or_build_index(collection_names)
     if result is None:
         return []
 
@@ -104,8 +140,8 @@ def reciprocal_rank_fusion(
     bm25_weight: float,
     k_rrf: int = 60,
 ) -> list[tuple[str, float]]:
-    """
-    Fuse vector and BM25 ranked lists using Reciprocal Rank Fusion.
+    """Fuse vector and BM25 ranked lists using Reciprocal Rank Fusion.
+
     Returns merged list sorted by fused score descending.
     """
     vector_weight = 1.0 - bm25_weight

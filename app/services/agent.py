@@ -12,7 +12,6 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
@@ -21,10 +20,12 @@ from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.config import settings
-from app.models import ChatMessage, SearchRequest, SearchResponse
-from app.services import embedding, qdrant
-from app.services.bm25 import bm25_search, reciprocal_rank_fusion
-from app.services.reranker import rerank
+from app.models import SearchRequest, SearchResponse
+from app.services.pipeline import (
+    embed_dense_and_sparse,
+    extract_queries_from_messages,
+    retrieve_one_query,
+)
 
 log = logging.getLogger(__name__)
 
@@ -34,26 +35,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class QueryPlan(BaseModel):
-    """The agent's decision on how to handle the incoming query."""
-
-    strategy: Literal["direct", "rewrite", "decompose"]
-    queries: list[str]
-
-
 class RetrievalResult(BaseModel):
     """Result from a single retrieval pass."""
 
     texts: list[str]
     metadatas: list[dict]
     distances: list[float]
-
-
-class GradedResult(BaseModel):
-    """Agent's assessment of retrieval quality."""
-
-    relevant: bool
-    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +89,13 @@ documents relate to the query at all). Rewrite the query to be more specific \
 and try again (up to {max_iterations} attempts total). Do not retry just \
 because the answer is not explicitly stated — relevant context is enough.
 
+When grading relevance, use any structural or descriptive metadata each \
+result exposes — ``title`` (the document's own title), ``headers`` (the \
+section/heading breadcrumb a chunk sits under), ``page`` (page number in \
+the source document), and ``languages`` (detected language codes — useful \
+to spot language mismatches between user query and result) are strong \
+topical signals even when the chunk's body text is terse or generic.
+
 Keep queries concise and focused. Prefer a single well-crafted query over \
 multiple overlapping ones.\
 """
@@ -140,66 +134,26 @@ def _build_agent() -> Agent[AgentDeps, str]:
 
         Returns documents, metadata, and relevance scores.
         """
-        log.info("Agent tool 'retrieve' called with queries=%s", queries)
-        vectors = await embedding.embed_queries(queries)
+        log.info("Agent tool 'retrieve' called with %d queries", len(queries))
+        log.debug("Agent tool 'retrieve' queries: %s", queries)
+        vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
         all_results: list[RetrievalResult] = []
 
-        for query_text, query_vector in zip(queries, vectors, strict=True):
-            tasks = [
-                qdrant.vector_search(coll, query_vector, ctx.deps.fetch_k)
-                for coll in ctx.deps.collection_names
-            ]
-            results = await asyncio.gather(*tasks)
-
-            merged_texts: list[str] = []
-            merged_metadatas: list[dict] = []
-            merged_distances: list[float] = []
-
-            for result in results:
-                merged_texts.extend(result.texts)
-                merged_metadatas.extend(result.metadatas)
-                merged_distances.extend(result.distances)
-
-            # Optional hybrid search
-            if settings.enable_hybrid_search and merged_texts:
-                vector_ranked = list(zip(merged_texts, merged_distances, strict=True))
-                bm25_tasks = [
-                    bm25_search(coll, query_text, ctx.deps.fetch_k)
-                    for coll in ctx.deps.collection_names
-                ]
-                bm25_results_per_coll = await asyncio.gather(*bm25_tasks)
-                bm25_merged: list[tuple[str, float]] = []
-                for bm25_res in bm25_results_per_coll:
-                    bm25_merged.extend(bm25_res)
-
-                fused = reciprocal_rank_fusion(
-                    vector_ranked, bm25_merged, settings.hybrid_bm25_weight
-                )
-                text_to_meta: dict[str, dict] = {}
-                for text, meta in zip(merged_texts, merged_metadatas, strict=True):
-                    if text not in text_to_meta:
-                        text_to_meta[text] = meta
-                merged_texts = [text for text, _ in fused]
-                merged_distances = [score for _, score in fused]
-                merged_metadatas = [text_to_meta.get(t, {}) for t in merged_texts]
-
-            # Optional reranking
-            if settings.enable_reranking and merged_texts:
-                merged_texts, merged_metadatas, merged_distances = await rerank(
-                    query_text, merged_texts, merged_metadatas, ctx.deps.k
-                )
-
-            log.info(
-                "Retrieve for %r: %d documents found",
+        for query_text, query_vector, sparse_vec in zip(
+            queries, vectors, sparse_vectors, strict=True
+        ):
+            texts, metadatas, distances = await retrieve_one_query(
                 query_text,
-                len(merged_texts),
+                query_vector,
+                sparse_vec,
+                ctx.deps.collection_names,
+                ctx.deps.fetch_k,
+                use_native_hybrid,
+                rerank_k=ctx.deps.k,
             )
+            log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
             all_results.append(
-                RetrievalResult(
-                    texts=merged_texts,
-                    metadatas=merged_metadatas,
-                    distances=merged_distances,
-                )
+                RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
             )
 
         # Accumulate full results across retries (dedup happens downstream)
@@ -227,14 +181,6 @@ def _get_agent() -> Agent[AgentDeps, str]:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-
-def extract_queries_from_messages(messages: list[ChatMessage]) -> list[str]:
-    """Extract search queries from chat messages (last user message)."""
-    for message in reversed(messages):
-        if message.role == "user" and message.content.strip():
-            return [message.content.strip()]
-    return []
 
 
 def _parse_fallback_queries(output: str) -> list[str] | None:
@@ -269,6 +215,44 @@ def _parse_fallback_queries(output: str) -> list[str] | None:
     return None
 
 
+_PREVIEW_META_FIELDS: tuple[str, ...] = (
+    "source",
+    "title",
+    "page",
+    "headers",
+    "languages",
+    "collection_type",
+)
+
+
+def _preview_meta(meta: dict) -> dict:
+    """Pick the subset of chunk metadata the retrieval-specialist agent sees.
+
+    Structural fields (``page``, ``headers``) help the agent grade relevance —
+    e.g. a chunk under ``headers=["Privacy", "Foundational Principles"]`` is
+    a strong topical signal even when the body text is vague. ``source`` and
+    ``collection_type`` ground the chunk's provenance. ``title`` (the
+    document's own title from extractor metadata) and ``languages`` (detected
+    language codes) are extra topical and language-match signals.
+
+    Missing / empty / falsy values are dropped so the LLM doesn't burn context
+    on ``"page": null`` or ``"headers": []``. The full meta still flows
+    through ``deps.full_results`` to the final ``SearchResponse``; this is
+    purely about what the agent sees mid-loop.
+    """
+    out: dict = {}
+    for key in _PREVIEW_META_FIELDS:
+        value = meta.get(key)
+        if value in (None, "", [], {}):
+            continue
+        out[key] = value
+    # ``source`` is the only field every preview should carry — keep an empty
+    # string if it wasn't set, matching the previous contract.
+    if "source" not in out:
+        out["source"] = ""
+    return out
+
+
 def _build_previews(
     all_results: list[RetrievalResult],
     *,
@@ -279,23 +263,25 @@ def _build_previews(
 
     Full results stay in AgentDeps.full_results (used by the final response);
     previews are bounded by preview_k to keep the agent's context window
-    under control across iterations.
+    under control across iterations. Each preview carries ``source`` plus
+    any structural fields (``page``, ``headers``, ``collection_type``) the
+    chunk has — see ``_preview_meta``.
     """
     seen: set[str] = set()
     preview_texts: list[str] = []
-    preview_sources: list[str] = []
+    preview_metas: list[dict] = []
     preview_distances: list[float] = []
 
     for r in all_results:
         if len(preview_texts) >= preview_k:
             break
         for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
             if text_hash in seen:
                 continue
             seen.add(text_hash)
             preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
-            preview_sources.append(meta.get("source", ""))
+            preview_metas.append(_preview_meta(meta))
             preview_distances.append(dist)
             if len(preview_texts) >= preview_k:
                 break
@@ -303,7 +289,7 @@ def _build_previews(
     return [
         RetrievalResult(
             texts=preview_texts,
-            metadatas=[{"source": s} for s in preview_sources],
+            metadatas=preview_metas,
             distances=preview_distances,
         )
     ]
@@ -320,7 +306,7 @@ def _dedup_results(
 
     for result in results:
         for text, meta, dist in zip(result.texts, result.metadatas, result.distances, strict=True):
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
             if text_hash in seen:
                 continue
             seen.add(text_hash)
@@ -334,12 +320,18 @@ def _dedup_results(
 
 
 async def agentic_search(request: SearchRequest) -> SearchResponse:
-    """
-    Run the PydanticAI agent to perform agentic retrieval:
-    1. Agent analyzes query and decides strategy (direct/rewrite/decompose)
-    2. Agent calls retrieve tool (possibly multiple times with rewritten queries)
-    3. Agent grades results and retries if needed
-    4. Results are deduped and returned
+    """Run the PydanticAI agent loop for agentic retrieval.
+
+    The agent generates 1-2 queries and calls the ``retrieve`` tool once. It
+    accepts the results if **any** returned document is on-topic, and only
+    retries with rewritten queries when results are completely off-topic.
+    Bounded by ``AGENT_MAX_ITERATIONS`` and ``AGENT_TIMEOUT`` (wall-clock).
+
+    Full retrieval results accumulate on ``AgentDeps.full_results`` across
+    iterations; only truncated previews go back to the LLM. On timeout, or
+    when the agent emits queries as text instead of calling the tool, the
+    fallback path performs a direct vector search using
+    :func:`_parse_fallback_queries` to recover the queries.
     """
     queries = request.queries
     if not queries and request.messages:
@@ -386,7 +378,12 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         f"Return up to {k} results."
     )
 
-    log.info("Agentic search: queries=%s, collections=%s", queries, request.collection_names)
+    log.info(
+        "Agentic search: queries=%d, collections=%s",
+        len(queries),
+        request.collection_names,
+    )
+    log.debug("Agentic search queries: %s", queries)
 
     try:
         result = await asyncio.wait_for(
@@ -405,33 +402,32 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
-        log.warning(
-            "Agent did not call retrieve tool — falling back to direct search. Agent output: %s",
+        log.warning("Agent did not call retrieve tool — falling back to direct search.")
+        log.debug(
+            "Agent fallback output (truncated): %s",
             result.output[:500] if result.output else "(empty)",
         )
         try:
             fallback_queries = _parse_fallback_queries(result.output) or queries
-            vectors = await embedding.embed_queries(fallback_queries)
+            vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(
+                fallback_queries
+            )
             fallback_results: list[RetrievalResult] = []
-            for _query_text, query_vector in zip(fallback_queries, vectors, strict=True):
-                tasks = [
-                    qdrant.vector_search(coll, query_vector, fetch_k)
-                    for coll in request.collection_names
-                ]
-                results = await asyncio.gather(*tasks)
-                merged_texts: list[str] = []
-                merged_metadatas: list[dict] = []
-                merged_distances: list[float] = []
-                for r in results:
-                    merged_texts.extend(r.texts)
-                    merged_metadatas.extend(r.metadatas)
-                    merged_distances.extend(r.distances)
+            for query_text, query_vector, sparse_vec in zip(
+                fallback_queries, vectors, sparse_vectors, strict=True
+            ):
+                # rerank_k=None — fallback intentionally returns raw vector results.
+                texts, metadatas, distances = await retrieve_one_query(
+                    query_text,
+                    query_vector,
+                    sparse_vec,
+                    request.collection_names,
+                    fetch_k,
+                    use_native_hybrid,
+                    rerank_k=None,
+                )
                 fallback_results.append(
-                    RetrievalResult(
-                        texts=merged_texts,
-                        metadatas=merged_metadatas,
-                        distances=merged_distances,
-                    )
+                    RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
                 )
             deps.full_results = fallback_results
         except Exception:

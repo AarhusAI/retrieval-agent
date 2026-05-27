@@ -56,8 +56,8 @@ async def test_embed_queries_applies_prefix():
         await embed_queries(["test query"])
 
     call_payload = mock_post.call_args[1]["json"]
-    # Prefix comes from settings.embedding_query_prefix
-    assert call_payload["input"][0].startswith(settings.embedding_query_prefix)
+    # Prefix comes from settings.embedding_prefix_query
+    assert call_payload["input"][0].startswith(settings.embedding_prefix_query)
     assert "test query" in call_payload["input"][0]
 
 

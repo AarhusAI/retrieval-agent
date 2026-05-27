@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
+from string import Template
 
 import httpx
 from openai import AsyncOpenAI
@@ -40,6 +41,7 @@ async def close_client() -> None:
         await _client.close()
         _client = None
 
+
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """\
 ### Task:
 Analyze the chat history and generate 1-3 search queries optimized for \
@@ -55,16 +57,16 @@ meaning of the user's information need.
 - Reformulate conversational references into standalone, self-contained queries.
 - Each query should target a different aspect or angle to maximize retrieval coverage.
 - If the user's message clearly needs no document retrieval \
-(e.g. greetings), return: {{ "queries": [] }}
+(e.g. greetings), return: { "queries": [] }
 - Respond in the same language as the user's messages.
-- Today's date is: {current_date}
+- Today's date is: $current_date
 
 ### Output:
-{{ "queries": ["query1", "query2"] }}
+{ "queries": ["query1", "query2"] }
 
 ### Chat History:
 <chat_history>
-{chat_history}
+$chat_history
 </chat_history>\
 """
 
@@ -78,11 +80,20 @@ def _get_template(override: str | None = None) -> str:
 
 
 def render_template(template: str, messages: list[ChatMessage]) -> str:
-    """Render the query generation template with chat history and date."""
+    """Render the query generation template with chat history and date.
+
+    Uses ``string.Template`` (``$name`` placeholders) instead of
+    ``str.format`` so that an attacker-controlled template (passed through
+    via the request body or env var) cannot reach into Python's attribute
+    machinery — ``str.format`` honours ``{x.__class__.__bases__[0].__subclasses__()}``
+    style expressions and would otherwise let any caller with the bearer
+    walk to ``settings`` and exfiltrate upstream API keys. ``safe_substitute``
+    leaves unknown ``$`` placeholders untouched rather than raising.
+    """
     # Use last 4 messages (matching Open WebUI's {{MESSAGES:END:4}})
     recent = messages[-4:]
     chat_history = "\n".join(f"{m.role}: {m.content}" for m in recent)
-    return template.format(
+    return Template(template).safe_substitute(
         current_date=date.today().isoformat(),
         chat_history=chat_history,
     )
@@ -132,7 +143,8 @@ async def generate_queries_from_messages(
         bracket_start = content.find("{")
         bracket_end = content.rfind("}") + 1
         if bracket_start == -1 or bracket_end <= 0:
-            log.warning("No JSON object in query generation response: %s", content)
+            log.warning("No JSON object in query generation response")
+            log.debug("Query generation response payload: %s", content)
             return []
 
         parsed = json.loads(content[bracket_start:bracket_end])
@@ -143,7 +155,8 @@ async def generate_queries_from_messages(
             return []
 
         queries = [q for q in queries if isinstance(q, str) and q.strip()]
-        log.info("Generated %d queries from messages: %s", len(queries), queries)
+        log.info("Generated %d queries from messages", len(queries))
+        log.debug("Generated queries: %s", queries)
         return queries
 
     except Exception:
