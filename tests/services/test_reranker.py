@@ -108,3 +108,19 @@ async def test_rerank_connect_error_falls_back_to_unranked():
     assert texts == ["doc1", "doc2"]
     assert metas == [{"id": 1}, {"id": 2}]
     assert scores == [0.0, 0.0]
+
+
+async def test_rerank_failure_increments_failure_counter():
+    """The fail-open path must bump reranker_failures_total."""
+    from prometheus_client import REGISTRY
+
+    before = REGISTRY.get_sample_value("reranker_failures_total") or 0.0
+    with patch.object(
+        httpx.AsyncClient,
+        "post",
+        new_callable=AsyncMock,
+        side_effect=httpx.ConnectError("Connection refused"),
+    ):
+        await rerank("query", ["doc1"], [{"id": 1}], k=5)
+    after = REGISTRY.get_sample_value("reranker_failures_total")
+    assert after == before + 1

@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from pydantic import BaseModel
@@ -19,7 +19,9 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from app import metrics
 from app.config import settings
+from app.log_utils import sanitize_for_log
 from app.models import SearchRequest, SearchResponse
 from app.services.pipeline import (
     embed_dense_and_sparse,
@@ -57,6 +59,10 @@ class AgentDeps:
     fetch_k: int
     # Side-channel: full results stored here, truncated previews sent to LLM
     full_results: list[RetrievalResult] | None = None
+    # Per-retrieve-round insight (queries built + per-query hit counts + top
+    # scores), appended once per ``retrieve`` tool call. Drives the DEBUG
+    # round-trace and makes the agent's retry behaviour observable.
+    round_stats: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +161,16 @@ def _build_agent() -> Agent[AgentDeps, str]:
             all_results.append(
                 RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
             )
+
+        # Record this round's queries, per-query hit counts and top scores so
+        # the agent's search/retry behaviour is observable after the run.
+        ctx.deps.round_stats.append(
+            {
+                "queries": list(queries),
+                "hit_counts": [len(r.texts) for r in all_results],
+                "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
+            }
+        )
 
         # Accumulate full results across retries (dedup happens downstream)
         ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
@@ -386,11 +402,13 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     log.debug("Agentic search queries: %s", queries)
 
     try:
-        result = await asyncio.wait_for(
-            agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
-            timeout=settings.agent_timeout,
-        )
+        async with metrics.time_stage("agent_loop"):
+            result = await asyncio.wait_for(
+                agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
+                timeout=settings.agent_timeout,
+            )
     except TimeoutError:
+        metrics.agent_timeouts_total.inc()
         log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
         retrieval_results = deps.full_results or []
         texts, metadatas, distances = _dedup_results(retrieval_results, k)
@@ -402,6 +420,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
+        metrics.agent_fallback_total.inc()
         log.warning("Agent did not call retrieve tool — falling back to direct search.")
         log.debug(
             "Agent fallback output (truncated): %s",
@@ -442,16 +461,23 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         run_usage,
     )
 
-    # Log per-request token usage from each model response
+    # Walk the model responses to surface, per step: token usage by role, and
+    # the queries the agent built each retrieve round. ``retrieve_rounds > 1``
+    # means a corrective retry happened (the agent judged a round off-topic and
+    # searched again) — the closest observable signal of the retry decision.
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     step = 0
+    retrieve_rounds = 0
     for msg in result.all_messages():
         if isinstance(msg, ModelResponse):
             step += 1
             u = msg.usage
-            has_tool_calls = any(isinstance(p, ToolCallPart) for p in msg.parts)
-            role = "retrieve" if has_tool_calls else "evaluate"
+            tool_calls = [p for p in msg.parts if isinstance(p, ToolCallPart)]
+            role = "retrieve" if tool_calls else "evaluate"
+            if tool_calls:
+                retrieve_rounds += 1
+            metrics.agent_tokens_total.labels(role=role).inc(u.input_tokens + u.output_tokens)
             log.debug(
                 "Agent step %d/%d (%s): model=%s, input_tokens=%d, "
                 "output_tokens=%d, total_tokens=%d",
@@ -463,6 +489,22 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
                 u.output_tokens,
                 u.input_tokens + u.output_tokens,
             )
+            for part in tool_calls:
+                if part.tool_name == "retrieve":
+                    round_queries = part.args_as_dict().get("queries", [])
+                    log.debug(
+                        "Agent step %d built queries: %s",
+                        step,
+                        sanitize_for_log(round_queries),
+                    )
+
+    metrics.agent_iterations.observe(run_usage.requests)
+    if retrieve_rounds > 1:
+        metrics.agent_retries_total.inc()
+        log.info("Agent performed %d retrieve rounds (retry occurred)", retrieve_rounds)
+    if deps.round_stats:
+        log.debug("Agent round stats: %s", deps.round_stats)
+
     texts, metadatas, distances = _dedup_results(retrieval_results, k)
     log.info("Returning %d deduplicated results", len(texts))
 

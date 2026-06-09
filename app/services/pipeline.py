@@ -15,10 +15,13 @@ When ``ENABLE_HYBRID_SEARCH`` is on:
 
 import hashlib
 import logging
+import time
 
 from qdrant_client.http.models import SparseVector
 
+from app import metrics
 from app.config import settings
+from app.log_utils import sanitize_for_log
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services import embedding, qdrant, sparse_embedding
 from app.services.bm25 import bm25_search, reciprocal_rank_fusion
@@ -46,13 +49,28 @@ async def embed_dense_and_sparse(
     and downstream callers fall back to dense-only retrieval (with optional
     client-side BM25 RRF if hybrid is on).
     """
-    vectors = await embedding.embed_queries(queries)
+    async with metrics.time_stage("embed_dense"):
+        vectors = await embedding.embed_queries(queries)
     use_native_hybrid = settings.enable_hybrid_search and qdrant.has_sparse_vectors()
-    sparse_vectors: list[SparseVector | None] = (
-        await sparse_embedding.embed_queries(queries)
-        if use_native_hybrid
-        else [None] * len(queries)
-    )
+    if use_native_hybrid:
+        async with metrics.time_stage("embed_sparse"):
+            sparse_vectors: list[SparseVector | None] = await sparse_embedding.embed_queries(
+                queries
+            )
+    else:
+        sparse_vectors = [None] * len(queries)
+
+    # Record which fusion path this search will take so operators can see
+    # whether native server-side RRF, the client-side BM25 fallback, or
+    # dense-only retrieval is actually running.
+    if use_native_hybrid:
+        path = "native_sparse"
+    elif settings.enable_hybrid_search:
+        path = "bm25_fallback"
+    else:
+        path = "dense_only"
+    metrics.hybrid_path_total.labels(path=path).inc()
+
     return vectors, sparse_vectors, use_native_hybrid
 
 
@@ -76,30 +94,42 @@ async def retrieve_one_query(
     ``use_native_hybrid`` is false — native hybrid already RRF-fuses
     server-side, so client-side fusion would double-rank.
     """
-    result = await qdrant.vector_search(
-        collection_names,
-        query_vector,
-        sparse_vec,
-        fetch_k,
-    )
+    async with metrics.time_stage("qdrant"):
+        result = await qdrant.vector_search(
+            collection_names,
+            query_vector,
+            sparse_vec,
+            fetch_k,
+        )
     texts = list(result.texts)
     metadatas = list(result.metadatas)
     distances = list(result.distances)
+    metrics.candidates_fetched.observe(len(texts))
+    log.debug(
+        "retrieve_one_query q=%s candidates=%d top_scores=%s",
+        sanitize_for_log(query_text),
+        len(texts),
+        [round(d, 4) for d in distances[:3]],
+    )
 
     if settings.enable_hybrid_search and not use_native_hybrid and texts:
-        vector_ranked = list(zip(texts, distances, strict=True))
-        bm25_results = await bm25_search(collection_names, query_text, fetch_k)
-        fused = reciprocal_rank_fusion(vector_ranked, bm25_results, settings.hybrid_bm25_weight)
-        text_to_meta: dict[str, dict] = {}
-        for text, meta in zip(texts, metadatas, strict=True):
-            if text not in text_to_meta:
-                text_to_meta[text] = meta
-        texts = [text for text, _ in fused]
-        distances = [score for _, score in fused]
-        metadatas = [text_to_meta.get(t, {}) for t in texts]
+        async with metrics.time_stage("bm25"):
+            vector_ranked = list(zip(texts, distances, strict=True))
+            bm25_results = await bm25_search(collection_names, query_text, fetch_k)
+            fused = reciprocal_rank_fusion(
+                vector_ranked, bm25_results, settings.hybrid_bm25_weight
+            )
+            text_to_meta: dict[str, dict] = {}
+            for text, meta in zip(texts, metadatas, strict=True):
+                if text not in text_to_meta:
+                    text_to_meta[text] = meta
+            texts = [text for text, _ in fused]
+            distances = [score for _, score in fused]
+            metadatas = [text_to_meta.get(t, {}) for t in texts]
 
     if settings.enable_reranking and texts and rerank_k is not None:
-        texts, metadatas, distances = await rerank(query_text, texts, metadatas, rerank_k)
+        async with metrics.time_stage("rerank"):
+            texts, metadatas, distances = await rerank(query_text, texts, metadatas, rerank_k)
 
     return texts, metadatas, distances
 
@@ -173,13 +203,14 @@ async def _resolve_queries(request: SearchRequest) -> list[str]:
     if request.messages and settings.enable_query_generation:
         from app.services.query_generation import generate_queries_from_messages
 
-        queries = await generate_queries_from_messages(
-            request.messages,
-            template_override=request.retrieval_query_generation_prompt_template,
-        )
+        async with metrics.time_stage("query_generation"):
+            queries = await generate_queries_from_messages(
+                request.messages,
+                template_override=request.retrieval_query_generation_prompt_template,
+            )
         if queries:
             log.info("Generated %d queries from messages", len(queries))
-            log.debug("Generated queries: %s", queries)
+            log.debug("Generated queries: %s", sanitize_for_log(queries))
 
     if not queries:
         queries = request.queries or []
@@ -187,18 +218,42 @@ async def _resolve_queries(request: SearchRequest) -> list[str]:
     if not queries and request.messages:
         queries = extract_queries_from_messages(request.messages)
         log.info("Extracted %d queries from %d messages", len(queries), len(request.messages))
-        log.debug("Extracted queries: %s", queries)
+        log.debug("Extracted queries: %s", sanitize_for_log(queries))
 
     return queries
 
 
 async def search(request: SearchRequest) -> SearchResponse:
-    """Main entry point: routes to agentic or linear pipeline based on config."""
-    if settings.enable_agentic_rag:
-        from app.services.agent import agentic_search
+    """Main entry point: routes to agentic or linear pipeline based on config.
 
-        log.info("Using agentic search pipeline")
-        return await agentic_search(request)
+    Single owner of request-level metrics: ``search_requests_total`` (success
+    and error), ``search_duration_seconds`` and ``results_returned`` are all
+    recorded here so there's no double-counting and the ``pipeline`` label is
+    consistent across both.
+    """
+    pipeline = "agentic" if settings.enable_agentic_rag else "linear"
+    start = time.perf_counter()
+    try:
+        if settings.enable_agentic_rag:
+            from app.services.agent import agentic_search
 
-    log.info("Using linear search pipeline")
-    return await linear_search(request)
+            log.info("Using agentic search pipeline")
+            response = await agentic_search(request)
+        else:
+            log.info("Using linear search pipeline")
+            response = await linear_search(request)
+    except Exception as exc:
+        metrics.search_requests_total.labels(
+            pipeline=pipeline, outcome="error", code=type(exc).__name__
+        ).inc()
+        raise
+    else:
+        metrics.search_requests_total.labels(
+            pipeline=pipeline, outcome="success", code="none"
+        ).inc()
+        metrics.results_returned.observe(sum(len(d) for d in response.documents))
+        return response
+    finally:
+        metrics.search_duration_seconds.labels(pipeline=pipeline).observe(
+            time.perf_counter() - start
+        )

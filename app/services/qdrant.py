@@ -21,6 +21,7 @@ from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.config import settings
+from app.log_utils import sanitize_for_log
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ async def vector_search(
 
     log.info(
         "vector_search: collections=%s (qdrant=%s, hybrid=%s) k=%d",
-        collection_names,
+        sanitize_for_log(collection_names),
         qdrant_collection,
         use_hybrid,
         k,
@@ -256,7 +257,7 @@ def scroll_collection_texts(
                     "scroll_collection_texts hit BM25_MAX_DOCS=%d for %s; "
                     "building BM25 index on partial set",
                     max_docs,
-                    collection_names,
+                    sanitize_for_log(collection_names),
                 )
                 return results
         if next_offset is None:

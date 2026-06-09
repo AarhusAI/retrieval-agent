@@ -222,6 +222,82 @@ class TestAgenticSearch:
         assert "doc2" in result.documents[0]
 
 
+class TestAgentRetryObservability:
+    async def test_two_retrieve_rounds_count_as_retry(self):
+        """retrieve → evaluate → retrieve in the message history means the agent
+        judged the first round off-topic and searched again: that's a retry, and
+        ``agent_retries_total`` must increment."""
+        from prometheus_client import REGISTRY
+        from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.usage import RequestUsage
+
+        messages = [
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="retrieve", args={"queries": ["q1"]})],
+                usage=RequestUsage(input_tokens=10, output_tokens=5),
+            ),
+            ModelResponse(
+                parts=[TextPart(content="off-topic, retrying")],
+                usage=RequestUsage(input_tokens=8, output_tokens=4),
+            ),
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="retrieve", args={"queries": ["q2 better"]})],
+                usage=RequestUsage(input_tokens=12, output_tokens=6),
+            ),
+        ]
+
+        async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+            mock_result = MagicMock()
+            mock_result.output = "done"
+            mock_result.usage.return_value = _mock_usage(requests=3)
+            mock_result.all_messages.return_value = messages
+            return mock_result
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        before = REGISTRY.get_sample_value("agent_retries_total") or 0.0
+        with patch("app.services.agent._get_agent", return_value=mock_agent):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            result = await agentic_search(request)
+
+        after = REGISTRY.get_sample_value("agent_retries_total")
+        assert after == before + 1
+        assert result.documents == [["doc"]]
+
+    async def test_single_retrieve_round_is_not_a_retry(self):
+        from prometheus_client import REGISTRY
+        from pydantic_ai.messages import ModelResponse, ToolCallPart
+        from pydantic_ai.usage import RequestUsage
+
+        messages = [
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="retrieve", args={"queries": ["q1"]})],
+                usage=RequestUsage(input_tokens=10, output_tokens=5),
+            ),
+        ]
+
+        async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+            mock_result = MagicMock()
+            mock_result.output = "done"
+            mock_result.usage.return_value = _mock_usage(requests=2)
+            mock_result.all_messages.return_value = messages
+            return mock_result
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        before = REGISTRY.get_sample_value("agent_retries_total") or 0.0
+        with patch("app.services.agent._get_agent", return_value=mock_agent):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            await agentic_search(request)
+
+        after = REGISTRY.get_sample_value("agent_retries_total") or 0.0
+        assert after == before
+
+
 class TestBuildPreviews:
     def test_caps_at_preview_k(self):
         """Preview output is bounded by preview_k regardless of input size."""

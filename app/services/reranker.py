@@ -2,6 +2,7 @@ import logging
 
 import httpx
 
+from app import metrics
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ async def rerank(
         resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPStatusError, httpx.ConnectError) as exc:
+        metrics.reranker_failures_total.inc()
         log.warning("Reranker request failed (%s), returning unranked results", exc)
         return documents[:k], metadatas[:k], [0.0] * min(len(documents), k)
 

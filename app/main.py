@@ -1,25 +1,30 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app.auth import verify_api_key
 from app.config import settings
+from app.logging_config import configure_logging
 from app.routes.search import router as search_router
 from app.services import embedding, qdrant, query_generation, reranker, sparse_embedding
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-if settings.debug:
-    logging.getLogger("app").setLevel(logging.DEBUG)
+configure_logging(settings)
 log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting agentic retrieval service")
+    log.info(
+        "Observability: log_level=%s log_format=%s metrics_enabled=%s debug=%s",
+        settings.log_level,
+        settings.log_format,
+        settings.metrics_enabled,
+        settings.debug,
+    )
     log.info("Qdrant: uri=%s index=%s", settings.qdrant_uri, settings.qdrant_index)
     log.info(
         "Embedding: model=%s query_prefix=%r",
@@ -85,6 +90,19 @@ app.include_router(search_router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics(_api_key: str = Depends(verify_api_key)):
+    """Prometheus scrape endpoint.
+
+    Bearer-authenticated with the same ``API_KEY`` as ``/search`` — the scrape
+    job must send ``Authorization: Bearer <API_KEY>``. Returns 404 when
+    METRICS_ENABLED=false; instrumentation runs regardless.
+    """
+    if not settings.metrics_enabled:
+        return JSONResponse(status_code=404, content={"detail": "metrics disabled"})
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health/ready")

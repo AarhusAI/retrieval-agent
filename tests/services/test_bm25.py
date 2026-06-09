@@ -103,3 +103,20 @@ class TestBm25Cache:
 
         # Sorted-tuple key — both calls land in the same cache entry
         assert mock_scroll.call_count == 1
+
+    async def test_cache_miss_then_hit_increments_counters(self):
+        """First lookup builds the index (miss); second reuses it (hit)."""
+        from prometheus_client import REGISTRY
+
+        miss_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "miss"}) or 0.0
+        hit_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "hit"}) or 0.0
+
+        mock_docs = [("id1", "hello world")]
+        with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
+            await bm25_search(["counter-coll"], "hello", k=2)  # miss → build
+            await bm25_search(["counter-coll"], "world", k=2)  # hit → cached
+
+        miss_after = REGISTRY.get_sample_value("bm25_cache_total", {"result": "miss"})
+        hit_after = REGISTRY.get_sample_value("bm25_cache_total", {"result": "hit"})
+        assert miss_after == miss_before + 1
+        assert hit_after == hit_before + 1
