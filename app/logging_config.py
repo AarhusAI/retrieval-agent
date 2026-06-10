@@ -20,6 +20,15 @@ from app.config import Settings
 
 _TEXT_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
+# Third-party loggers whose DEBUG output is pure wire chatter (httpcore
+# connect/send/recv, openai's full request/response dumps). Pinned to an INFO
+# floor so ``LOG_LEVEL=DEBUG`` stays readable. httpx's INFO "HTTP Request …
+# 200 OK" lines survive the floor (they already show at LOG_LEVEL=INFO); only
+# the DEBUG firehose is suppressed. The genuinely useful piece — the LLM
+# request payload openai used to dump — is re-emitted cleanly by ``app.llm``
+# (see app/log_utils.py:log_llm_request), which is unaffected by this floor.
+_NOISY_LOGGERS = ("httpcore", "httpx", "openai")
+
 # Standard LogRecord attributes — anything NOT here is a caller-supplied
 # ``extra=`` we want to promote to a top-level JSON field. Computed once from a
 # blank record so it tracks the running Python version's record shape.
@@ -55,6 +64,8 @@ def configure_logging(settings: Settings) -> None:
     - ``LOG_LEVEL`` sets the root level (DEBUG/INFO/WARNING/ERROR/CRITICAL).
     - ``DEBUG=true`` additionally bumps the ``app`` namespace to DEBUG without
       flooding third-party loggers (back-compat with the old single switch).
+    - Noisy HTTP-client loggers (``_NOISY_LOGGERS``) are pinned to an INFO floor
+      so even ``LOG_LEVEL=DEBUG`` doesn't drown in httpcore/openai wire chatter.
     - ``LOG_FORMAT`` picks the text (human) or json (aggregator) formatter.
     """
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -76,3 +87,10 @@ def configure_logging(settings: Settings) -> None:
     # leaving third-party loggers at the root level (no httpx flood).
     app_logger = logging.getLogger("app")
     app_logger.setLevel(logging.DEBUG if settings.debug else logging.NOTSET)
+
+    # Pin noisy HTTP-client loggers to an INFO floor. ``max`` only ever quiets,
+    # never amplifies: higher numeric == quieter (DEBUG=10 < INFO=20), so a
+    # quieter root (e.g. WARNING) is respected.
+    noisy_level = max(level, logging.INFO)
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(noisy_level)

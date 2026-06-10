@@ -86,6 +86,33 @@ class TestDedupResults:
         assert metas == []
         assert dists == []
 
+    def test_interleaves_so_second_query_survives_small_k(self):
+        """A unique, lower-scored doc from the second query must survive a small k.
+
+        Regression: the first query's results used to fill k entirely and later
+        queries were never considered, dropping a relevant-but-low-scored chunk
+        (e.g. a Danish chunk the cross-encoder under-ranked). Round-robin gives
+        the second query's best hit a slot near the front instead.
+        """
+        results = [
+            # Query 1: high-scored but off-target chunks (e.g. table-of-contents).
+            RetrievalResult(
+                texts=["toc1", "toc2", "toc3"],
+                metadatas=[{}, {}, {}],
+                distances=[0.80, 0.76, 0.70],
+            ),
+            # Query 2: the actually-relevant chunk, under-scored by the reranker.
+            RetrievalResult(
+                texts=["answer", "noise1", "noise2"],
+                metadatas=[{}, {}, {}],
+                distances=[0.13, 0.09, 0.09],
+            ),
+        ]
+        texts, _metas, dists = _dedup_results(results, k=3)
+        assert "answer" in texts
+        assert texts == ["toc1", "answer", "toc2"]
+        assert dists == [0.80, 0.13, 0.76]
+
 
 class TestAgenticSearch:
     async def test_empty_queries(self):
@@ -116,6 +143,49 @@ class TestAgenticSearch:
         assert result.documents == [["doc1", "doc2"]]
         assert result.metadatas == [[{"src": "a"}, {"src": "b"}]]
         assert result.distances == [[0.9, 0.8]]
+
+    async def test_seeds_raw_query_before_agent_loop(self):
+        """The user's original query is retrieved and merged even when the
+        agent's own queries drift off-target (Fix 2a)."""
+        # Agent contributes a high-scored but off-target chunk, appending like
+        # the real retrieve tool does.
+        drift = RetrievalResult(texts=["toc"], metadatas=[{"source": "toc"}], distances=[0.9])
+
+        async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.full_results = (deps.full_results or []) + [drift]
+            result = MagicMock()
+            result.output = "done"
+            result.usage.return_value = _mock_usage()
+            result.all_messages.return_value = []
+            return result
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        async def _embed(queries):
+            return ([[0.1]] * len(queries), [None] * len(queries), False)
+
+        async def _retrieve_one(query_text, *args, **kwargs):
+            return (["ANSWER"], [{"source": "Bankoplysninger.pdf"}], [0.06])
+
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch.object(settings, "agent_include_raw_query", True),
+            patch("app.services.agent.embed_dense_and_sparse", new=AsyncMock(side_effect=_embed)),
+            patch(
+                "app.services.agent.retrieve_one_query", new=AsyncMock(side_effect=_retrieve_one)
+            ),
+        ):
+            request = SearchRequest(
+                messages=[ChatMessage(role="user", content="Kan du oplyse bankoplysninger?")],
+                collection_names=["coll1"],
+                k=3,
+            )
+            result = await agentic_search(request)
+
+        flat = result.documents[0]
+        assert "ANSWER" in flat  # seeded raw-query result survived the merge
+        assert "toc" in flat  # the agent's own result is present too
 
     async def test_deduplicates_across_retrieval_results(self):
         """Agent returns multiple retrieval results with overlapping docs."""
@@ -321,6 +391,28 @@ class TestBuildPreviews:
         ]
         previews = _build_previews(all_results, max_chars=200, preview_k=10)
         assert previews[0].texts == ["a", "b", "c"]
+
+    def test_interleaves_across_queries(self):
+        """Previews round-robin across queries so the grader sees each query's best.
+
+        Mirrors what _dedup_results returns in the final payload, so the grader's
+        view and the returned documents stay consistent.
+        """
+        all_results = [
+            RetrievalResult(
+                texts=["a1", "a2", "a3"],
+                metadatas=[{"source": "a"}, {"source": "a"}, {"source": "a"}],
+                distances=[0.9, 0.8, 0.7],
+            ),
+            RetrievalResult(
+                texts=["b1", "b2"],
+                metadatas=[{"source": "b"}, {"source": "b"}],
+                distances=[0.2, 0.1],
+            ),
+        ]
+        previews = _build_previews(all_results, max_chars=200, preview_k=4)
+        # pos0 -> a1, b1 ; pos1 -> a2, b2 ; capped at 4
+        assert previews[0].texts == ["a1", "b1", "a2", "b2"]
 
     def test_truncates_long_text(self):
         all_results = [

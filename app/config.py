@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     reranker_api_base_url: str = ""
     reranker_api_key: str = ""
+    # How the cross-encoder ranking combines with the retrieval (dense/hybrid)
+    # ranking. "rrf" = Reciprocal Rank Fusion — keeps a strong dense hit that the
+    # cross-encoder underranks; "replace" = cross-encoder score only (the older
+    # behaviour, where the reranker can bury a top dense hit).
+    rerank_fusion: str = "rrf"
+    rerank_rrf_k: int = 60
     initial_retrieval_multiplier: int = 3
 
     # Query generation (from messages, for linear pipeline; agentic uses system prompt)
@@ -88,6 +94,10 @@ class Settings(BaseSettings):
     agent_fetch_k: int = 20
     agent_preview_k: int = 5
     agent_conversation_history_messages: int = 4
+    # Always run a deterministic retrieval pass with the user's original query
+    # (seeded before the agent loop) so recall doesn't depend on how the agent
+    # rewrites the question. Merged with the agent's retrievals downstream.
+    agent_include_raw_query: bool = True
 
     # ----- Observability -----
     # LOG_LEVEL is the primary verbosity dial, applied to the root logger (so

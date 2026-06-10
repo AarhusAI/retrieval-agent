@@ -318,10 +318,19 @@ third-party loggers.
 - **DEBUG** — adds the resolved/generated queries, each retrieve round's built queries (recovered from the
   agent's tool calls), per-query candidate counts and top scores, per-step agent token usage (searching vs
   grading), and the per-round `round_stats` (queries + hit counts + top scores). This is how you debug
-  **how the agent built its queries** and **what triggered a retry**.
+  **how the agent built its queries** and **what triggered a retry**. It also emits the **full LLM request
+  payload** (model + messages + tools + temperature, long fields truncated) under the `app.llm` logger, for
+  both the agent loop and linear query generation — so you can see exactly what was sent to the model.
+
+The noisy HTTP-client loggers (`httpcore`, `httpx`, `openai`) are pinned to an **INFO floor** even at
+`LOG_LEVEL=DEBUG`, so the wire-level chatter (`httpcore` connect/send/recv, `openai`'s raw request/response
+dumps) stays out of the way. `httpx`'s one-line `HTTP Request … 200 OK` summaries — already shown at INFO —
+survive. The useful part of `openai`'s old DEBUG dump (the request payload) is what `app.llm` re-emits cleanly.
 
 User-controlled values (queries, collection names) pass through `sanitize_for_log`, so a crafted value can't
-forge log lines. Query text and document scores *do* appear at DEBUG — treat DEBUG logs as containing user data.
+forge log lines. Query text and document scores *do* appear at DEBUG — and the `app.llm` payload contains the
+full prompt and retrieved chunks. `json.dumps` escapes newlines so payload content can't forge log lines, but
+treat DEBUG logs as containing user data.
 
 ### Structured logs (`LOG_FORMAT=json`)
 

@@ -6,7 +6,7 @@ import logging
 import pytest
 
 from app.config import Settings
-from app.logging_config import JsonFormatter, configure_logging
+from app.logging_config import _NOISY_LOGGERS, JsonFormatter, configure_logging
 
 
 def _settings(**overrides) -> Settings:
@@ -23,10 +23,13 @@ def _restore_logging():
     saved_handlers = root.handlers[:]
     saved_level = root.level
     saved_app_level = logging.getLogger("app").level
+    saved_noisy = {name: logging.getLogger(name).level for name in _NOISY_LOGGERS}
     yield
     root.handlers[:] = saved_handlers
     root.setLevel(saved_level)
     logging.getLogger("app").setLevel(saved_app_level)
+    for name, lvl in saved_noisy.items():
+        logging.getLogger(name).setLevel(lvl)
 
 
 def test_log_level_sets_root_level():
@@ -42,6 +45,21 @@ def test_debug_forces_app_namespace_to_debug():
 def test_debug_off_does_not_pin_app_namespace():
     configure_logging(_settings(log_level="INFO", debug=False))
     assert logging.getLogger("app").level == logging.NOTSET
+
+
+def test_debug_level_floors_noisy_loggers_to_info():
+    """At LOG_LEVEL=DEBUG the wire-noise libs stay at INFO while app goes DEBUG."""
+    configure_logging(_settings(log_level="DEBUG"))
+    assert logging.getLogger("app").level == logging.DEBUG
+    for name in _NOISY_LOGGERS:
+        assert logging.getLogger(name).level == logging.INFO
+
+
+def test_floor_never_amplifies_below_root():
+    """A root quieter than the INFO floor wins — the floor only quiets."""
+    configure_logging(_settings(log_level="WARNING"))
+    for name in _NOISY_LOGGERS:
+        assert logging.getLogger(name).level == logging.WARNING
 
 
 def test_json_format_installs_json_formatter():
