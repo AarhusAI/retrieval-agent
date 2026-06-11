@@ -10,16 +10,20 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import date
 
+import httpx
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from app import metrics
 from app.config import settings
+from app.log_utils import log_llm_request, sanitize_for_log
 from app.models import SearchRequest, SearchResponse
 from app.services.pipeline import (
     embed_dense_and_sparse,
@@ -57,6 +61,10 @@ class AgentDeps:
     fetch_k: int
     # Side-channel: full results stored here, truncated previews sent to LLM
     full_results: list[RetrievalResult] | None = None
+    # Per-retrieve-round insight (queries built + per-query hit counts + top
+    # scores), appended once per ``retrieve`` tool call. Drives the DEBUG
+    # round-trace and makes the agent's retry behaviour observable.
+    round_stats: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +116,8 @@ def _build_agent() -> Agent[AgentDeps, str]:
         provider=OpenAIProvider(
             base_url=settings.agent_api_base_url or None,
             api_key=settings.agent_api_key or None,
+            # Request hook logs the faithful LLM payload at DEBUG (app.llm).
+            http_client=httpx.AsyncClient(event_hooks={"request": [log_llm_request]}),
         ),
         profile=OpenAIModelProfile(
             openai_supports_strict_tool_definition=settings.agent_strict_tools,
@@ -155,6 +165,16 @@ def _build_agent() -> Agent[AgentDeps, str]:
             all_results.append(
                 RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
             )
+
+        # Record this round's queries, per-query hit counts and top scores so
+        # the agent's search/retry behaviour is observable after the run.
+        ctx.deps.round_stats.append(
+            {
+                "queries": list(queries),
+                "hit_counts": [len(r.texts) for r in all_results],
+                "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
+            }
+        )
 
         # Accumulate full results across retries (dedup happens downstream)
         ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
@@ -253,6 +273,42 @@ def _preview_meta(meta: dict) -> dict:
     return out
 
 
+def _interleave_dedup(
+    results: list[RetrievalResult],
+) -> Iterator[tuple[str, dict, float]]:
+    """Yield ``(text, meta, dist)`` round-robin across per-query result sets.
+
+    Each result set is already rerank-sorted, so position 0 is each query's
+    *best* hit. Interleaving by position gives every query fair representation
+    instead of letting the first query monopolise a small ``k`` — the bug where
+    one query's results filled the budget and a relevant chunk from a later
+    query was dropped before it was ever considered. Within a position, the
+    higher-scored candidate is yielded first (score is the tiebreak). Duplicate
+    texts (by MD5) are emitted once, keeping the first (highest-position,
+    highest-score) occurrence.
+
+    Order is intentionally *not* re-sorted globally by score: a relevant chunk
+    that the reranker under-scores must stay near the front so a downstream
+    top-k / threshold can't silently re-drop it.
+    """
+    seen: set[str] = set()
+    max_len = max((len(r.texts) for r in results), default=0)
+    for pos in range(max_len):
+        # Every query's candidate at this rank, best score first.
+        row = [
+            (r.distances[pos], r.texts[pos], r.metadatas[pos])
+            for r in results
+            if pos < len(r.texts)
+        ]
+        row.sort(key=lambda x: x[0], reverse=True)
+        for dist, text, meta in row:
+            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+            if text_hash in seen:
+                continue
+            seen.add(text_hash)
+            yield text, meta, dist
+
+
 def _build_previews(
     all_results: list[RetrievalResult],
     *,
@@ -265,26 +321,20 @@ def _build_previews(
     previews are bounded by preview_k to keep the agent's context window
     under control across iterations. Each preview carries ``source`` plus
     any structural fields (``page``, ``headers``, ``collection_type``) the
-    chunk has — see ``_preview_meta``.
+    chunk has — see ``_preview_meta``. Results are interleaved across queries
+    (see :func:`_interleave_dedup`) so the grader sees each query's best hits,
+    matching what :func:`_dedup_results` returns in the final payload.
     """
-    seen: set[str] = set()
     preview_texts: list[str] = []
     preview_metas: list[dict] = []
     preview_distances: list[float] = []
 
-    for r in all_results:
+    for text, meta, dist in _interleave_dedup(all_results):
+        preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
+        preview_metas.append(_preview_meta(meta))
+        preview_distances.append(dist)
         if len(preview_texts) >= preview_k:
             break
-        for text, meta, dist in zip(r.texts, r.metadatas, r.distances, strict=True):
-            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
-            if text_hash in seen:
-                continue
-            seen.add(text_hash)
-            preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
-            preview_metas.append(_preview_meta(meta))
-            preview_distances.append(dist)
-            if len(preview_texts) >= preview_k:
-                break
 
     return [
         RetrievalResult(
@@ -298,25 +348,68 @@ def _build_previews(
 def _dedup_results(
     results: list[RetrievalResult], k: int
 ) -> tuple[list[str], list[dict], list[float]]:
-    """Deduplicate and limit results across all retrieval passes."""
-    seen: set[str] = set()
+    """Deduplicate and limit results across all retrieval passes.
+
+    Interleaves across queries (see :func:`_interleave_dedup`) so a small ``k``
+    is shared fairly between queries rather than consumed entirely by the first.
+    """
     texts: list[str] = []
     metadatas: list[dict] = []
     distances: list[float] = []
 
-    for result in results:
-        for text, meta, dist in zip(result.texts, result.metadatas, result.distances, strict=True):
-            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
-            if text_hash in seen:
-                continue
-            seen.add(text_hash)
-            texts.append(text)
-            metadatas.append(meta)
-            distances.append(dist)
-            if len(texts) >= k:
-                return texts, metadatas, distances
+    for text, meta, dist in _interleave_dedup(results):
+        texts.append(text)
+        metadatas.append(meta)
+        distances.append(dist)
+        if len(texts) >= k:
+            break
 
     return texts, metadatas, distances
+
+
+def _source_score_pairs(metadatas: list[dict], distances: list[float]) -> list[tuple[str, float]]:
+    """``[(source, rounded_score), …]`` for DEBUG logging of a result set."""
+    return [
+        (meta.get("source", ""), round(dist, 4))
+        for meta, dist in zip(metadatas, distances, strict=True)
+    ]
+
+
+async def _retrieve_raw_queries(
+    queries: list[str],
+    collection_names: list[str],
+    fetch_k: int,
+    k: int,
+) -> list[RetrievalResult]:
+    """Retrieve the user's *original* queries, before the agent rewrites them.
+
+    Seeded into ``AgentDeps.full_results`` ahead of the agent loop so the
+    unmodified question is always searched and merged (via
+    :func:`_interleave_dedup`) with the agent's own retrievals. This keeps a
+    relevant chunk reachable even when the agent's reformulations drift toward
+    keyword/web-search phrasing that matches boilerplate instead of content.
+    Failures are swallowed — this is a recall safety-net, not a hard dependency.
+    """
+    try:
+        vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
+        results: list[RetrievalResult] = []
+        for query_text, query_vector, sparse_vec in zip(
+            queries, vectors, sparse_vectors, strict=True
+        ):
+            texts, metadatas, distances = await retrieve_one_query(
+                query_text,
+                query_vector,
+                sparse_vec,
+                collection_names,
+                fetch_k,
+                use_native_hybrid,
+                rerank_k=k,
+            )
+            results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
+        return results
+    except Exception:
+        log.exception("Raw-query seed retrieval failed; continuing with agent-only results")
+        return []
 
 
 async def agentic_search(request: SearchRequest) -> SearchResponse:
@@ -353,6 +446,20 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         fetch_k=fetch_k,
     )
 
+    # Always search the user's original query, independent of how the agent
+    # rewrites it; the agent's own retrievals append to this seed and the lot
+    # is merged by _interleave_dedup. Guards recall against query-rewrite drift.
+    if settings.agent_include_raw_query:
+        seeded = await _retrieve_raw_queries(queries, deps.collection_names, fetch_k, k)
+        if seeded:
+            deps.full_results = (deps.full_results or []) + seeded
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug(
+                    "Seeded %d raw-query result set(s) before agent loop: %s",
+                    len(seeded),
+                    [_source_score_pairs(r.metadatas, r.distances) for r in seeded],
+                )
+
     if request.messages:
         recent = request.messages[-settings.agent_conversation_history_messages :]
         conversation = "\n".join(f"{m.role}: {m.content}" for m in recent)
@@ -386,14 +493,19 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     log.debug("Agentic search queries: %s", queries)
 
     try:
-        result = await asyncio.wait_for(
-            agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
-            timeout=settings.agent_timeout,
-        )
+        async with metrics.time_stage("agent_loop"):
+            result = await asyncio.wait_for(
+                agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
+                timeout=settings.agent_timeout,
+            )
     except TimeoutError:
+        metrics.agent_timeouts_total.inc()
         log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
         retrieval_results = deps.full_results or []
         texts, metadatas, distances = _dedup_results(retrieval_results, k)
+        log.info("Returning %d deduplicated results (timeout)", len(texts))
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Final payload (timeout): %s", _source_score_pairs(metadatas, distances))
         return SearchResponse(
             documents=[texts],
             metadatas=[metadatas],
@@ -402,6 +514,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
+        metrics.agent_fallback_total.inc()
         log.warning("Agent did not call retrieve tool — falling back to direct search.")
         log.debug(
             "Agent fallback output (truncated): %s",
@@ -442,16 +555,23 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         run_usage,
     )
 
-    # Log per-request token usage from each model response
+    # Walk the model responses to surface, per step: token usage by role, and
+    # the queries the agent built each retrieve round. ``retrieve_rounds > 1``
+    # means a corrective retry happened (the agent judged a round off-topic and
+    # searched again) — the closest observable signal of the retry decision.
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     step = 0
+    retrieve_rounds = 0
     for msg in result.all_messages():
         if isinstance(msg, ModelResponse):
             step += 1
             u = msg.usage
-            has_tool_calls = any(isinstance(p, ToolCallPart) for p in msg.parts)
-            role = "retrieve" if has_tool_calls else "evaluate"
+            tool_calls = [p for p in msg.parts if isinstance(p, ToolCallPart)]
+            role = "retrieve" if tool_calls else "evaluate"
+            if tool_calls:
+                retrieve_rounds += 1
+            metrics.agent_tokens_total.labels(role=role).inc(u.input_tokens + u.output_tokens)
             log.debug(
                 "Agent step %d/%d (%s): model=%s, input_tokens=%d, "
                 "output_tokens=%d, total_tokens=%d",
@@ -463,8 +583,26 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
                 u.output_tokens,
                 u.input_tokens + u.output_tokens,
             )
+            for part in tool_calls:
+                if part.tool_name == "retrieve":
+                    round_queries = part.args_as_dict().get("queries", [])
+                    log.debug(
+                        "Agent step %d built queries: %s",
+                        step,
+                        sanitize_for_log(round_queries),
+                    )
+
+    metrics.agent_iterations.observe(run_usage.requests)
+    if retrieve_rounds > 1:
+        metrics.agent_retries_total.inc()
+        log.info("Agent performed %d retrieve rounds (retry occurred)", retrieve_rounds)
+    if deps.round_stats:
+        log.debug("Agent round stats: %s", deps.round_stats)
+
     texts, metadatas, distances = _dedup_results(retrieval_results, k)
     log.info("Returning %d deduplicated results", len(texts))
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("Final payload: %s", _source_score_pairs(metadatas, distances))
 
     return SearchResponse(
         documents=[texts],

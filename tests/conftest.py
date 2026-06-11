@@ -20,6 +20,11 @@ os.environ["ENABLE_QUERY_GENERATION"] = "false"
 # Sparse embedder defaults to fastembed but tests never let it actually load
 # weights — the sparse_embedding module is patched at the call site.
 os.environ["SPARSE_QUERY_PROVIDER"] = "none"
+# Observability — pin deterministic values so the container's compose env
+# (METRICS_ENABLED=true, LOG_LEVEL, …) can't change test expectations.
+os.environ["LOG_LEVEL"] = "INFO"
+os.environ["LOG_FORMAT"] = "text"
+os.environ["METRICS_ENABLED"] = "true"
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -37,6 +42,9 @@ settings.enable_reranking = False
 settings.enable_agentic_rag = False
 settings.enable_query_generation = False
 settings.sparse_query_provider = "none"
+settings.metrics_enabled = True
+settings.log_level = "INFO"
+settings.log_format = "text"
 
 
 @pytest.fixture

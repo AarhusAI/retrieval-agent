@@ -19,7 +19,9 @@ from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
 
+from app import metrics
 from app.config import settings
+from app.log_utils import sanitize_for_log
 from app.services.qdrant import scroll_collection_texts
 
 log = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ async def _get_or_build_index(
     now = time.monotonic()
     entry = _cache.get(key)
     if entry is not None and entry.expires_at > now:
+        metrics.bm25_cache_total.labels(result="hit").inc()
         return entry.bm25, entry.texts
 
     lock = _get_lock(key)
@@ -81,8 +84,10 @@ async def _get_or_build_index(
         # Double-check after acquiring lock
         entry = _cache.get(key)
         if entry is not None and entry.expires_at > now:
+            metrics.bm25_cache_total.labels(result="hit").inc()
             return entry.bm25, entry.texts
 
+        metrics.bm25_cache_total.labels(result="miss").inc()
         docs = await asyncio.to_thread(scroll_collection_texts, list(key))
         if not docs:
             return None
@@ -96,7 +101,7 @@ async def _get_or_build_index(
         while len(_cache) >= _CACHE_MAX_ENTRIES:
             evicted_key, _ = _cache.popitem(last=False)
             _cache_locks.pop(evicted_key, None)
-            log.debug("Evicted BM25 cache entry: %s", list(evicted_key))
+            log.debug("Evicted BM25 cache entry: %s", sanitize_for_log(list(evicted_key)))
 
         _cache[key] = _CacheEntry(
             bm25=bm25,
@@ -105,7 +110,7 @@ async def _get_or_build_index(
         )
         log.info(
             "BM25 index built for %s: %d documents (TTL=%ds)",
-            list(key),
+            sanitize_for_log(list(key)),
             len(texts),
             settings.bm25_cache_ttl_seconds,
         )

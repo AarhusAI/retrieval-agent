@@ -13,6 +13,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "fastembed>=0.4.0",                 # in-process sparse query embedder (BM42 / SPLADE / BGE-M3 sparse)
     "pydantic-ai-slim[openai]>=0.2.0,<1.0",
+    "prometheus-client>=0.20",          # /metrics scrape endpoint + in-process counters/histograms; single lib, no scraper code
 ]
 
 [project.optional-dependencies]
