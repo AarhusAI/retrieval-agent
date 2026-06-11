@@ -17,29 +17,41 @@ import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.log_utils import log_llm_request, sanitize_for_log
 from app.models import ChatMessage
 
 log = logging.getLogger(__name__)
 
 _client: AsyncOpenAI | None = None
+# Our own httpx transport so we can attach the request hook that logs the
+# faithful LLM payload at DEBUG (app.llm). Held separately because AsyncOpenAI
+# does not own a caller-supplied http_client — we close it ourselves.
+_http_client: httpx.AsyncClient | None = None
 
 
 def get_client() -> AsyncOpenAI:
-    global _client
+    global _client, _http_client
     if _client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            event_hooks={"request": [log_llm_request]},
+        )
         _client = AsyncOpenAI(
             base_url=settings.agent_api_base_url or None,
             api_key=settings.agent_api_key or "unused",
-            timeout=httpx.Timeout(30.0),
+            http_client=_http_client,
         )
     return _client
 
 
 async def close_client() -> None:
-    global _client
+    global _client, _http_client
     if _client is not None:
         await _client.close()
         _client = None
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
 
 
 DEFAULT_RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE = """\
@@ -144,7 +156,7 @@ async def generate_queries_from_messages(
         bracket_end = content.rfind("}") + 1
         if bracket_start == -1 or bracket_end <= 0:
             log.warning("No JSON object in query generation response")
-            log.debug("Query generation response payload: %s", content)
+            log.debug("Query generation response payload: %s", sanitize_for_log(content))
             return []
 
         parsed = json.loads(content[bracket_start:bracket_end])
@@ -156,7 +168,7 @@ async def generate_queries_from_messages(
 
         queries = [q for q in queries if isinstance(q, str) and q.strip()]
         log.info("Generated %d queries from messages", len(queries))
-        log.debug("Generated queries: %s", queries)
+        log.debug("Generated queries: %s", sanitize_for_log(queries))
         return queries
 
     except Exception:

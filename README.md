@@ -186,7 +186,10 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `AGENT_FETCH_K`                       | `20`                                          | Internal per-query candidate pool size; decoupled from `request.k` so a small `top_k` doesn't starve grading |
 | `AGENT_PREVIEW_K`                     | `5`                                           | Max previews returned to the agent per `retrieve` call (caps context-window pressure across iterations)      |
 | `AGENT_CONVERSATION_HISTORY_MESSAGES` | `4`                                           | How many trailing chat messages to include verbatim in the agent's user prompt                               |
-| `DEBUG`                               | `false`                                       | Enable debug logging (includes per-step token usage for agent and query generation)                          |
+| `LOG_LEVEL`                           | `INFO`                                        | Root log verbosity: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (third-party libs follow it too)             |
+| `LOG_FORMAT`                          | `text`                                        | `text` = human-readable single line; `json` = one JSON object per line for Loki / a structured-log pipeline  |
+| `METRICS_ENABLED`                     | `true`                                        | Expose Prometheus metrics at `GET /metrics` (instrumentation always runs; `false` → endpoint returns 404)    |
+| `DEBUG`                               | `false`                                       | Back-compat switch: bumps the `app` namespace to DEBUG without flooding third-party loggers (`LOG_LEVEL=DEBUG` is broader) |
 | `HOST`                                | `0.0.0.0`                                     | Server bind address                                                                                          |
 | `PORT`                                | `8000`                                        | Server port                                                                                                  |
 
@@ -297,3 +300,68 @@ the results are completely off-topic.
 - Agentic mode adds 2–5× latency and 2–4× token cost per query. Use a fast, cheap model (e.g. GPT-4o-mini) for
   agent decisions.
 - Agent LLM calls default to the LiteLLM proxy at `http://litellm:4000/v1`, making provider switching a config change.
+
+## Observability
+
+Independently-toggleable layers of insight into how a query gets retrieved. Nothing here needs an external
+service — the process only *exposes* metrics; scraping is the operator's job.
+
+### Log verbosity (`LOG_LEVEL`)
+
+`LOG_LEVEL` is the primary dial (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`), applied to the root logger.
+`DEBUG=true` is a back-compat single switch that bumps only the `app` namespace to DEBUG without flooding
+third-party loggers.
+
+- **INFO** — request summary (query/message counts, collections, `k`), which pipeline ran, the per-query
+  Qdrant call summary, BM25 index builds, reranker fail-open warnings, and — for the agent — an
+  `Agent performed N retrieve rounds (retry occurred)` line when a corrective retry happened.
+- **DEBUG** — adds the resolved/generated queries, each retrieve round's built queries (recovered from the
+  agent's tool calls), per-query candidate counts and top scores, per-step agent token usage (searching vs
+  grading), and the per-round `round_stats` (queries + hit counts + top scores). This is how you debug
+  **how the agent built its queries** and **what triggered a retry**. It also emits the **full LLM request
+  payload** (model + messages + tools + temperature, long fields truncated) under the `app.llm` logger, for
+  both the agent loop and linear query generation — so you can see exactly what was sent to the model.
+
+The noisy HTTP-client loggers (`httpcore`, `httpx`, `openai`) are pinned to an **INFO floor** even at
+`LOG_LEVEL=DEBUG`, so the wire-level chatter (`httpcore` connect/send/recv, `openai`'s raw request/response
+dumps) stays out of the way. `httpx`'s one-line `HTTP Request … 200 OK` summaries — already shown at INFO —
+survive. The useful part of `openai`'s old DEBUG dump (the request payload) is what `app.llm` re-emits cleanly.
+
+User-controlled values (queries, collection names) pass through `sanitize_for_log`, so a crafted value can't
+forge log lines. Query text and document scores *do* appear at DEBUG — and the `app.llm` payload contains the
+full prompt and retrieved chunks. `json.dumps` escapes newlines so payload content can't forge log lines, but
+treat DEBUG logs as containing user data.
+
+### Structured logs (`LOG_FORMAT=json`)
+
+`LOG_FORMAT=json` emits one JSON object per line (`ts`, `level`, `logger`, `msg`, plus any structured `extra=`
+fields) for Loki / a JSON-aware aggregator. `text` (default) is the human-readable single-line format.
+
+### Prometheus metrics (`GET /metrics`)
+
+Bearer-authenticated with the same `API_KEY` as `/search` — the scrape job must send
+`Authorization: Bearer <API_KEY>` (in Prometheus, an `authorization`/`bearer_token` on the scrape config).
+Toggle the endpoint with `METRICS_ENABLED` (`false` → 404; instrumentation always runs regardless).
+
+| Metric | Type | Answers |
+|---|---|---|
+| `search_requests_total{pipeline,outcome,code}` | counter | how often each pipeline runs / errors |
+| `search_duration_seconds{pipeline}` | histogram | whole-request latency |
+| `retrieval_stage_duration_seconds{stage}` | histogram | which stage dominates — `query_generation`/`embed_dense`/`embed_sparse`/`qdrant`/`bm25`/`rerank`/`agent_loop` |
+| `candidates_fetched` / `results_returned` | histogram | recall starvation before fusion / empty result sets |
+| `hybrid_path_total{path}` | counter | which fusion path ran — `native_sparse`/`bm25_fallback`/`dense_only` |
+| `agent_iterations` | histogram | how much the agent loops (model requests per run) |
+| `agent_retries_total` | counter | a corrective retry happened (>1 retrieve round) |
+| `agent_timeouts_total` / `agent_fallback_total` | counter | partial-result returns / non-tool-call fallback |
+| `agent_tokens_total{role}` | counter | token cost of searching vs grading |
+| `reranker_failures_total` | counter | reranker fail-open frequency |
+| `bm25_cache_total{result}` | counter | BM25 index cache hit/miss |
+
+Metrics are never labelled by collection name or query text (cardinality guard); `code` is a classified
+exception class name, never a raw message.
+
+### Debugging a single request
+
+There is no separate trace endpoint — the agent loop is ephemeral and persisted nowhere queryable. To debug
+one request, set `LOG_LEVEL=DEBUG` and read the container logs: the resolved queries, each retrieve round's
+queries and candidate scores, the retry line, and per-step token usage all appear in that request's log stream.
