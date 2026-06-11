@@ -19,11 +19,11 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     log.info("Starting agentic retrieval service")
     log.info(
-        "Observability: log_level=%s log_format=%s metrics_enabled=%s debug=%s",
+        "Observability: log_level=%s log_level_app=%s log_format=%s metrics_enabled=%s",
         settings.log_level,
+        settings.log_level_app or "(inherit)",
         settings.log_format,
         settings.metrics_enabled,
-        settings.debug,
     )
     log.info("Qdrant: uri=%s index=%s", settings.qdrant_uri, settings.qdrant_index)
     log.info(

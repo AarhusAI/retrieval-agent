@@ -30,8 +30,22 @@ def test_log_format_rejects_unknown():
         _settings(log_format="yaml")
 
 
+def test_log_level_app_normalises_case():
+    assert _settings(log_level_app="debug").log_level_app == "DEBUG"
+
+
+def test_log_level_app_empty_stays_empty():
+    assert _settings(log_level_app="").log_level_app == ""
+
+
+def test_log_level_app_rejects_unknown():
+    with pytest.raises(ValidationError):
+        _settings(log_level_app="verbose")
+
+
 def test_observability_defaults():
     s = _settings()
     assert s.log_level == "INFO"
+    assert s.log_level_app == ""
     assert s.log_format == "text"
     assert s.metrics_enabled is True

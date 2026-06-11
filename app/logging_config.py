@@ -1,9 +1,11 @@
 """Logging configuration.
 
 Replaces the previous inline ``basicConfig`` with a setup driven by
-``LOG_LEVEL`` / ``LOG_FORMAT``. ``DEBUG=true`` still force-bumps the ``app``
-namespace to DEBUG (preserving the historical single-switch behaviour) while
-``LOG_LEVEL`` is the new primary verbosity dial applied to the root logger.
+``LOG_LEVEL`` / ``LOG_FORMAT``. ``LOG_LEVEL`` is the primary verbosity dial
+applied to the root logger; ``LOG_LEVEL_APP`` is an optional per-namespace
+override that tunes the service's own loggers (``app.*``) without touching the
+third-party loggers (so you can run verbose app logs without the wire-chatter
+flood).
 
 The JSON formatter is a small in-repo class — no extra dependency, matching the
 repo's lean-deps stance — so logs can ship to Loki / a JSON-aware aggregator
@@ -62,8 +64,9 @@ def configure_logging(settings: Settings) -> None:
     """Configure the root logger from ``settings``. Idempotent.
 
     - ``LOG_LEVEL`` sets the root level (DEBUG/INFO/WARNING/ERROR/CRITICAL).
-    - ``DEBUG=true`` additionally bumps the ``app`` namespace to DEBUG without
-      flooding third-party loggers (back-compat with the old single switch).
+    - ``LOG_LEVEL_APP`` optionally overrides just the ``app`` namespace, so our
+      own code can be verbose without flooding third-party loggers. Empty
+      inherits the root level.
     - Noisy HTTP-client loggers (``_NOISY_LOGGERS``) are pinned to an INFO floor
       so even ``LOG_LEVEL=DEBUG`` doesn't drown in httpcore/openai wire chatter.
     - ``LOG_FORMAT`` picks the text (human) or json (aggregator) formatter.
@@ -83,10 +86,14 @@ def configure_logging(settings: Settings) -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
-    # Back-compat: the legacy DEBUG flag makes our own code verbose while
-    # leaving third-party loggers at the root level (no httpx flood).
+    # Per-namespace override: make our own code ('app.*') verbose while leaving
+    # third-party loggers at the root level (no httpx flood). Empty LOG_LEVEL_APP
+    # -> NOTSET -> inherit the root level.
     app_logger = logging.getLogger("app")
-    app_logger.setLevel(logging.DEBUG if settings.debug else logging.NOTSET)
+    if settings.log_level_app:
+        app_logger.setLevel(getattr(logging, settings.log_level_app, logging.NOTSET))
+    else:
+        app_logger.setLevel(logging.NOTSET)
 
     # Pin noisy HTTP-client loggers to an INFO floor. ``max`` only ever quiets,
     # never amplifies: higher numeric == quieter (DEBUG=10 < INFO=20), so a

@@ -187,9 +187,9 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `AGENT_PREVIEW_K`                     | `5`                                           | Max previews returned to the agent per `retrieve` call (caps context-window pressure across iterations)      |
 | `AGENT_CONVERSATION_HISTORY_MESSAGES` | `4`                                           | How many trailing chat messages to include verbatim in the agent's user prompt                               |
 | `LOG_LEVEL`                           | `INFO`                                        | Root log verbosity: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (third-party libs follow it too)             |
+| `LOG_LEVEL_APP`                       | `` (inherits `LOG_LEVEL`)                     | Per-namespace override for the `app.*` loggers only; set to `DEBUG` for verbose app logs without the third-party DEBUG flood. Empty inherits `LOG_LEVEL` |
 | `LOG_FORMAT`                          | `text`                                        | `text` = human-readable single line; `json` = one JSON object per line for Loki / a structured-log pipeline  |
 | `METRICS_ENABLED`                     | `true`                                        | Expose Prometheus metrics at `GET /metrics` (instrumentation always runs; `false` → endpoint returns 404)    |
-| `DEBUG`                               | `false`                                       | Back-compat switch: bumps the `app` namespace to DEBUG without flooding third-party loggers (`LOG_LEVEL=DEBUG` is broader) |
 | `HOST`                                | `0.0.0.0`                                     | Server bind address                                                                                          |
 | `PORT`                                | `8000`                                        | Server port                                                                                                  |
 
@@ -306,11 +306,13 @@ the results are completely off-topic.
 Independently-toggleable layers of insight into how a query gets retrieved. Nothing here needs an external
 service — the process only *exposes* metrics; scraping is the operator's job.
 
-### Log verbosity (`LOG_LEVEL`)
+### Log verbosity (`LOG_LEVEL`, `LOG_LEVEL_APP`)
 
 `LOG_LEVEL` is the primary dial (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`), applied to the root logger.
-`DEBUG=true` is a back-compat single switch that bumps only the `app` namespace to DEBUG without flooding
-third-party loggers.
+`LOG_LEVEL_APP` optionally overrides just the `app.*` namespace, so you can run verbose app logs without
+the third-party DEBUG flood (`httpcore`/`httpx`/`openai`); empty inherits `LOG_LEVEL`. Setting
+`LOG_LEVEL_APP=DEBUG` while leaving `LOG_LEVEL=INFO` gives you everything in the **DEBUG** list below
+without amplifying the root logger.
 
 - **INFO** — request summary (query/message counts, collections, `k`), which pipeline ran, the per-query
   Qdrant call summary, BM25 index builds, reranker fail-open warnings, and — for the agent — an

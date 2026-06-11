@@ -125,9 +125,23 @@ class Settings(BaseSettings):
             raise ValueError(f"LOG_FORMAT must be 'text' or 'json'; got {v!r}")
         return lower
 
-    # Debug — back-compat single switch: bumps the 'app' namespace to DEBUG
-    # without flooding third-party loggers. LOG_LEVEL=DEBUG is the broader dial.
-    debug: bool = False
+    # Per-namespace override for the service's own loggers ('app.*'), applied on
+    # top of LOG_LEVEL. Set to DEBUG to see verbose app logs without the
+    # third-party DEBUG flood (httpcore/httpx/openai). Empty = inherit the root.
+    log_level_app: str = ""
+
+    @field_validator("log_level_app")
+    @classmethod
+    def _validate_log_level_app(cls, v: str) -> str:
+        if not v:
+            return ""
+        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        upper = v.upper()
+        if upper not in allowed:
+            raise ValueError(
+                f"LOG_LEVEL_APP must be one of {sorted(allowed)} or empty; got {v!r}"
+            )
+        return upper
 
     # Server
     host: str = "0.0.0.0"  # nosec B104  # containerized service; binding to all interfaces is intentional
