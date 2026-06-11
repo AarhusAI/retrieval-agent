@@ -91,6 +91,23 @@ class TestBm25Cache:
         by_text = {text: meta for text, _score, meta in results}
         assert by_text["hello world"] == {"source": "a.pdf", "collection_name": "c1"}
 
+    async def test_zero_score_documents_are_kept(self):
+        """Zero scores must NOT be filtered: rank_bm25's IDF is 0 for a term
+        in half the corpus, so a genuinely matching doc can score 0 in a
+        small collection — filtering on score > 0 drops real keyword hits."""
+        mock_docs = [
+            ("id1", "hello world", {"source": "a.pdf"}),
+            ("id2", "completely unrelated text", {"source": "b.pdf"}),
+        ]
+        with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
+            results = await bm25_search(["test-coll"], "hello", k=5)
+
+        texts = [text for text, _score, _meta in results]
+        # "hello" has df=1 of N=2 → IDF ln(1.5/1.5)=0 → score 0; it must
+        # still come back (ranked first by the stable sort).
+        assert texts[0] == "hello world"
+        assert len(results) == 2
+
     async def test_empty_collection_returns_empty(self):
         with patch("app.services.bm25.scroll_collection_texts", return_value=[]):
             result = await bm25_search(["empty-coll"], "hello", k=2)

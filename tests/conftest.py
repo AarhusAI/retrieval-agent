@@ -23,6 +23,7 @@ os.environ["SPARSE_QUERY_PROVIDER"] = "none"
 # Observability — pin deterministic values so the container's compose env
 # (METRICS_ENABLED=true, LOG_LEVEL, …) can't change test expectations.
 os.environ["LOG_LEVEL"] = "INFO"
+os.environ["LOG_LEVEL_APP"] = ""
 os.environ["LOG_FORMAT"] = "text"
 os.environ["METRICS_ENABLED"] = "true"
 
@@ -44,6 +45,7 @@ settings.enable_query_generation = False
 settings.sparse_query_provider = "none"
 settings.metrics_enabled = True
 settings.log_level = "INFO"
+settings.log_level_app = ""
 settings.log_format = "text"
 
 

@@ -133,6 +133,12 @@ async def bm25_search(
     Returns ``(text, score, meta)`` triples sorted by score descending — meta
     rides along so BM25-only hits keep their provenance through RRF fusion.
     Empty list when the collection set has no documents.
+
+    Zero-score documents are deliberately *not* filtered out: rank_bm25's IDF
+    is ``ln((N - df + 0.5) / (df + 0.5))``, which is exactly 0 for a term
+    appearing in half the corpus (and epsilon-floored when more common), so a
+    genuinely matching document can score 0 in a small collection. Filtering
+    on ``score > 0`` drops those real keyword hits.
     """
     result = await _get_or_build_index(collection_names)
     if result is None:

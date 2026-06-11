@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Response
@@ -73,6 +74,12 @@ async def lifespan(app: FastAPI):
     await embedding.close_client()
     await reranker.close_client()
     await query_generation.close_client()
+    # The agent module is imported lazily (pipeline only pulls in pydantic_ai
+    # when agentic mode runs) — close its transport only if it was ever loaded,
+    # without forcing the import here.
+    agent_module = sys.modules.get("app.services.agent")
+    if agent_module is not None:
+        await agent_module.close_client()
     sparse_embedding.close()
     qdrant.close_client()
     log.info("Agentic retrieval service shut down")

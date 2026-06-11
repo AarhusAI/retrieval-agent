@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -45,6 +45,17 @@ class RetrievalResult(BaseModel):
     texts: list[str]
     metadatas: list[dict]
     distances: list[float]
+
+    @model_validator(mode="after")
+    def _require_parallel_lists(self):
+        # _interleave_dedup indexes all three lists by position — a length
+        # mismatch must fail at construction, not as an IndexError mid-merge.
+        if not (len(self.texts) == len(self.metadatas) == len(self.distances)):
+            raise ValueError(
+                f"texts ({len(self.texts)}), metadatas ({len(self.metadatas)}) and "
+                f"distances ({len(self.distances)}) must have the same length"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -109,15 +120,28 @@ multiple overlapping ones.\
 """
 
 
+# Held at module level so the lifespan can close it at shutdown; the OpenAI
+# SDK does not own a caller-supplied http_client.
+_http_client: httpx.AsyncClient | None = None
+
+
 def _build_agent() -> Agent[AgentDeps, str]:
     """Build the PydanticAI agent. Called once at module level."""
+    global _http_client
+    _http_client = httpx.AsyncClient(
+        # Transport-level backstop aligned with the run-level wall clock
+        # (asyncio.wait_for in agentic_search); the OpenAI SDK may override
+        # per request, the run bound is what actually caps a hung call.
+        timeout=httpx.Timeout(settings.agent_timeout),
+        # Request hook logs the faithful LLM payload at DEBUG (app.llm).
+        event_hooks={"request": [log_llm_request]},
+    )
     model = OpenAIChatModel(
         settings.agent_model,
         provider=OpenAIProvider(
             base_url=settings.agent_api_base_url or None,
             api_key=settings.agent_api_key or None,
-            # Request hook logs the faithful LLM payload at DEBUG (app.llm).
-            http_client=httpx.AsyncClient(event_hooks={"request": [log_llm_request]}),
+            http_client=_http_client,
         ),
         profile=OpenAIModelProfile(
             openai_supports_strict_tool_definition=settings.agent_strict_tools,
@@ -206,6 +230,15 @@ def _get_agent() -> Agent[AgentDeps, str]:
     if _agent is None:
         _agent = _build_agent()
     return _agent
+
+
+async def close_client() -> None:
+    """Close the agent's httpx transport. Called from the lifespan shutdown."""
+    global _agent, _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+    _agent = None
 
 
 # ---------------------------------------------------------------------------
