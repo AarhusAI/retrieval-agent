@@ -13,6 +13,7 @@ When ``ENABLE_HYBRID_SEARCH`` is on:
     the same collection scope.
 """
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -49,9 +50,16 @@ async def embed_dense_and_sparse(
     and downstream callers fall back to dense-only retrieval (with optional
     client-side BM25 RRF if hybrid is on).
     """
+    if not queries:
+        return [], [], False
+
     async with metrics.time_stage("embed_dense"):
         vectors = await embedding.embed_queries(queries)
-    use_native_hybrid = settings.enable_hybrid_search and qdrant.has_sparse_vectors()
+    # has_sparse_vectors hits Qdrant (sync client) until its answer is cached —
+    # probe in a worker thread to keep the event loop free.
+    use_native_hybrid = settings.enable_hybrid_search and await asyncio.to_thread(
+        qdrant.has_sparse_vectors
+    )
     if use_native_hybrid:
         async with metrics.time_stage("embed_sparse"):
             sparse_vectors: list[SparseVector | None] = await sparse_embedding.embed_queries(
@@ -117,12 +125,18 @@ async def retrieve_one_query(
             vector_ranked = list(zip(texts, distances, strict=True))
             bm25_results = await bm25_search(collection_names, query_text, fetch_k)
             fused = reciprocal_rank_fusion(
-                vector_ranked, bm25_results, settings.hybrid_bm25_weight
+                vector_ranked,
+                [(text, score) for text, score, _ in bm25_results],
+                settings.hybrid_bm25_weight,
             )
+            # Vector metadata wins; BM25 triples fill in provenance for docs
+            # only BM25 surfaced (they were never in the vector result set).
             text_to_meta: dict[str, dict] = {}
             for text, meta in zip(texts, metadatas, strict=True):
                 if text not in text_to_meta:
                     text_to_meta[text] = meta
+            for text, _score, meta in bm25_results:
+                text_to_meta.setdefault(text, meta)
             texts = [text for text, _ in fused]
             distances = [score for _, score in fused]
             metadatas = [text_to_meta.get(t, {}) for t in texts]
@@ -134,6 +148,32 @@ async def retrieve_one_query(
     return texts, metadatas, distances
 
 
+def _dedup_topk(
+    texts: list[str],
+    metadatas: list[dict],
+    distances: list[float],
+    k: int,
+) -> tuple[list[str], list[dict], list[float]]:
+    """Dedup by text content hash (MD5), preserving order, limited to k."""
+    seen: set[str] = set()
+    deduped_texts: list[str] = []
+    deduped_metadatas: list[dict] = []
+    deduped_distances: list[float] = []
+
+    for text, meta, dist in zip(texts, metadatas, distances, strict=True):
+        text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+        if text_hash in seen:
+            continue
+        seen.add(text_hash)
+        deduped_texts.append(text)
+        deduped_metadatas.append(meta)
+        deduped_distances.append(dist)
+        if len(deduped_texts) >= k:
+            break
+
+    return deduped_texts, deduped_metadatas, deduped_distances
+
+
 async def linear_search(request: SearchRequest) -> SearchResponse:
     """Traditional linear pipeline:
 
@@ -143,6 +183,9 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
     4. Optional client-side BM25 RRF (only when hybrid is on AND no sparse)
     5. Optional cross-encoder reranking
     6. Dedup by MD5, limit to k
+
+    Queries run concurrently — each query's retrieve/fuse/rerank chain is
+    independent, so per-query wall-clock doesn't stack up.
     """
     k = request.k
     fetch_k = k * settings.initial_retrieval_multiplier if settings.enable_reranking else k
@@ -153,11 +196,11 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
 
     vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
 
-    all_documents: list[list[str]] = []
-    all_metadatas: list[list[dict]] = []
-    all_distances: list[list[float]] = []
-
-    for query_text, query_vector, sparse_vec in zip(queries, vectors, sparse_vectors, strict=True):
+    async def _one_query(
+        query_text: str,
+        query_vector: list[float],
+        sparse_vec: SparseVector | None,
+    ) -> tuple[list[str], list[dict], list[float]]:
         merged_texts, merged_metadatas, merged_distances = await retrieve_one_query(
             query_text,
             query_vector,
@@ -167,32 +210,21 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
             use_native_hybrid,
             rerank_k=k,
         )
+        return _dedup_topk(merged_texts, merged_metadatas, merged_distances, k)
 
-        # Dedup by text content hash, limit to k
-        seen: set[str] = set()
-        deduped_texts: list[str] = []
-        deduped_metadatas: list[dict] = []
-        deduped_distances: list[float] = []
-
-        for text, meta, dist in zip(merged_texts, merged_metadatas, merged_distances, strict=True):
-            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
-            if text_hash in seen:
-                continue
-            seen.add(text_hash)
-            deduped_texts.append(text)
-            deduped_metadatas.append(meta)
-            deduped_distances.append(dist)
-            if len(deduped_texts) >= k:
-                break
-
-        all_documents.append(deduped_texts)
-        all_metadatas.append(deduped_metadatas)
-        all_distances.append(deduped_distances)
+    per_query = await asyncio.gather(
+        *(
+            _one_query(query_text, query_vector, sparse_vec)
+            for query_text, query_vector, sparse_vec in zip(
+                queries, vectors, sparse_vectors, strict=True
+            )
+        )
+    )
 
     return SearchResponse(
-        documents=all_documents,
-        metadatas=all_metadatas,
-        distances=all_distances,
+        documents=[texts for texts, _, _ in per_query],
+        metadatas=[metas for _, metas, _ in per_query],
+        distances=[dists for _, _, dists in per_query],
     )
 
 

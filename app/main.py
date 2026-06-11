@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -109,7 +110,9 @@ async def metrics(_api_key: str = Depends(verify_api_key)):
 async def health_ready():
     """Readiness probe — verifies Qdrant connectivity."""
     try:
-        qdrant.get_client().get_collections()
+        # Sync Qdrant client — probe in a worker thread so a hung Qdrant
+        # connection can't stall the event loop (and with it /health).
+        await asyncio.to_thread(lambda: qdrant.get_client().get_collections())
         return {"status": "ok"}
     except Exception as exc:
         # Log full exception server-side; surface only a generic status to

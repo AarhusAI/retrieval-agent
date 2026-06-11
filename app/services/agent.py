@@ -144,48 +144,58 @@ def _build_agent() -> Agent[AgentDeps, str]:
 
         Returns documents, metadata, and relevance scores.
         """
-        log.info("Agent tool 'retrieve' called with %d queries", len(queries))
-        log.debug("Agent tool 'retrieve' queries: %s", queries)
-        vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
-        all_results: list[RetrievalResult] = []
-
-        for query_text, query_vector, sparse_vec in zip(
-            queries, vectors, sparse_vectors, strict=True
-        ):
-            texts, metadatas, distances = await retrieve_one_query(
-                query_text,
-                query_vector,
-                sparse_vec,
-                ctx.deps.collection_names,
-                ctx.deps.fetch_k,
-                use_native_hybrid,
-                rerank_k=ctx.deps.k,
-            )
-            log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
-            all_results.append(
-                RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
-            )
-
-        # Record this round's queries, per-query hit counts and top scores so
-        # the agent's search/retry behaviour is observable after the run.
-        ctx.deps.round_stats.append(
-            {
-                "queries": list(queries),
-                "hit_counts": [len(r.texts) for r in all_results],
-                "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
-            }
-        )
-
-        # Accumulate full results across retries (dedup happens downstream)
-        ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
-
-        return _build_previews(
-            all_results,
-            max_chars=settings.agent_tool_preview_chars,
-            preview_k=settings.agent_preview_k,
-        )
+        return await _run_retrieve(ctx.deps, queries)
 
     return agent
+
+
+async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalResult]:
+    """Body of the ``retrieve`` tool, module-level so it's unit-testable."""
+    log.info("Agent tool 'retrieve' called with %d queries", len(queries))
+    log.debug("Agent tool 'retrieve' queries: %s", sanitize_for_log(queries))
+
+    if not queries:
+        # The system prompt tells the model to call retrieve([]) when no
+        # retrieval is needed (greetings, small talk). Mark full_results so
+        # the no-tool-call fallback doesn't fire, and skip the embedding
+        # round-trip — OpenAI-compatible APIs reject an empty input list.
+        deps.full_results = deps.full_results or []
+        return []
+
+    vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
+    all_results: list[RetrievalResult] = []
+
+    for query_text, query_vector, sparse_vec in zip(queries, vectors, sparse_vectors, strict=True):
+        texts, metadatas, distances = await retrieve_one_query(
+            query_text,
+            query_vector,
+            sparse_vec,
+            deps.collection_names,
+            deps.fetch_k,
+            use_native_hybrid,
+            rerank_k=deps.k,
+        )
+        log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
+        all_results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
+
+    # Record this round's queries, per-query hit counts and top scores so
+    # the agent's search/retry behaviour is observable after the run.
+    deps.round_stats.append(
+        {
+            "queries": list(queries),
+            "hit_counts": [len(r.texts) for r in all_results],
+            "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
+        }
+    )
+
+    # Accumulate full results across retries (dedup happens downstream)
+    deps.full_results = (deps.full_results or []) + all_results
+
+    return _build_previews(
+        all_results,
+        max_chars=settings.agent_tool_preview_chars,
+        preview_k=settings.agent_preview_k,
+    )
 
 
 _agent: Agent[AgentDeps, str] | None = None
@@ -490,7 +500,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         len(queries),
         request.collection_names,
     )
-    log.debug("Agentic search queries: %s", queries)
+    log.debug("Agentic search queries: %s", sanitize_for_log(queries))
 
     try:
         async with metrics.time_stage("agent_loop"):

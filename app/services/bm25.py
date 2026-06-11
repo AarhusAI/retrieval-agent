@@ -41,6 +41,7 @@ def _tokenize(text: str) -> list[str]:
 class _CacheEntry:
     bm25: BM25Okapi
     texts: tuple[str, ...]
+    metas: tuple[dict, ...]
     expires_at: float
 
 
@@ -70,14 +71,14 @@ def clear_cache() -> None:
 
 async def _get_or_build_index(
     collection_names: list[str],
-) -> tuple[BM25Okapi, tuple[str, ...]] | None:
+) -> tuple[BM25Okapi, tuple[str, ...], tuple[dict, ...]] | None:
     """Get cached BM25 index or build a new one. Returns ``None`` for empty result sets."""
     key = _make_key(collection_names)
     now = time.monotonic()
     entry = _cache.get(key)
     if entry is not None and entry.expires_at > now:
         metrics.bm25_cache_total.labels(result="hit").inc()
-        return entry.bm25, entry.texts
+        return entry.bm25, entry.texts, entry.metas
 
     lock = _get_lock(key)
     async with lock:
@@ -85,14 +86,18 @@ async def _get_or_build_index(
         entry = _cache.get(key)
         if entry is not None and entry.expires_at > now:
             metrics.bm25_cache_total.labels(result="hit").inc()
-            return entry.bm25, entry.texts
+            return entry.bm25, entry.texts, entry.metas
 
         metrics.bm25_cache_total.labels(result="miss").inc()
         docs = await asyncio.to_thread(scroll_collection_texts, list(key))
         if not docs:
+            # No cache entry is inserted for empty scopes, so the eviction in
+            # the insert path below would never reclaim this key's lock —
+            # drop it here or repeated lookups of empty scopes leak locks.
+            _cache_locks.pop(key, None)
             return None
 
-        _ids, texts = zip(*docs, strict=True)
+        _ids, texts, metas = zip(*docs, strict=True)
         tokenized = [_tokenize(t) for t in texts]
         bm25 = BM25Okapi(tokenized)
 
@@ -106,6 +111,7 @@ async def _get_or_build_index(
         _cache[key] = _CacheEntry(
             bm25=bm25,
             texts=texts,
+            metas=metas,
             expires_at=now + settings.bm25_cache_ttl_seconds,
         )
         log.info(
@@ -114,27 +120,28 @@ async def _get_or_build_index(
             len(texts),
             settings.bm25_cache_ttl_seconds,
         )
-        return bm25, texts
+        return bm25, texts, metas
 
 
 async def bm25_search(
     collection_names: list[str],
     query: str,
     k: int,
-) -> list[tuple[str, float]]:
+) -> list[tuple[str, float, dict]]:
     """BM25 search across a set of logical collections.
 
-    Returns ``(text, score)`` pairs sorted by score descending. Empty list when
-    the collection set has no documents.
+    Returns ``(text, score, meta)`` triples sorted by score descending — meta
+    rides along so BM25-only hits keep their provenance through RRF fusion.
+    Empty list when the collection set has no documents.
     """
     result = await _get_or_build_index(collection_names)
     if result is None:
         return []
 
-    bm25, texts = result
+    bm25, texts, metas = result
     scores = bm25.get_scores(_tokenize(query))
 
-    scored = list(zip(texts, scores, strict=True))
+    scored = list(zip(texts, scores, metas, strict=True))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:k]
 

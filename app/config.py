@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_prefix_query: str = "query: "
 
+    @field_validator("embedding_api_base_url")
+    @classmethod
+    def _require_embedding_base_url(cls, v: str) -> str:
+        # Every pipeline embeds queries; an empty base URL only fails at the
+        # first search with an obscure httpx error. Refuse to boot instead.
+        if not v.strip():
+            raise ValueError("EMBEDDING_API_BASE_URL must be set (no usable default exists)")
+        return v
+
     # Hybrid search. When enabled, retrieval uses native Qdrant hybrid (Query API
     # with prefetch + RRF fusion) for collections that carry sparse vectors, and
     # falls back to client-side BM25 RRF for collections that don't.
@@ -138,9 +147,7 @@ class Settings(BaseSettings):
         allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         upper = v.upper()
         if upper not in allowed:
-            raise ValueError(
-                f"LOG_LEVEL_APP must be one of {sorted(allowed)} or empty; got {v!r}"
-            )
+            raise ValueError(f"LOG_LEVEL_APP must be one of {sorted(allowed)} or empty; got {v!r}")
         return upper
 
     # Server
