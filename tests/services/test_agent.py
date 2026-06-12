@@ -8,6 +8,7 @@ from app.services.agent import (
     _build_previews,
     _dedup_results,
     _parse_fallback_queries,
+    _run_retrieve,
     agentic_search,
     extract_queries_from_messages,
 )
@@ -112,6 +113,45 @@ class TestDedupResults:
         assert "answer" in texts
         assert texts == ["toc1", "answer", "toc2"]
         assert dists == [0.80, 0.13, 0.76]
+
+
+class TestRunRetrieve:
+    async def test_empty_queries_skips_embedding(self):
+        """retrieve([]) signals 'no retrieval needed' (per the system prompt) —
+        it must not hit the embedding API (OpenAI-compatible servers reject
+        an empty input list) and must mark full_results so the no-tool-call
+        fallback doesn't fire."""
+        deps = AgentDeps(collection_names=["coll1"], k=5, fetch_k=20)
+
+        with patch(
+            "app.services.agent.embed_dense_and_sparse", new_callable=AsyncMock
+        ) as mock_embed:
+            previews = await _run_retrieve(deps, [])
+
+        mock_embed.assert_not_called()
+        assert previews == []
+        assert deps.full_results == []  # set (not None) → fallback won't fire
+
+    async def test_non_empty_queries_retrieve_and_accumulate(self):
+        deps = AgentDeps(collection_names=["coll1"], k=5, fetch_k=20)
+
+        async def _embed(queries):
+            return ([[0.1]] * len(queries), [None] * len(queries), False)
+
+        async def _retrieve_one(query_text, *args, **kwargs):
+            return (["doc"], [{"source": "a.pdf"}], [0.9])
+
+        with (
+            patch("app.services.agent.embed_dense_and_sparse", AsyncMock(side_effect=_embed)),
+            patch("app.services.agent.retrieve_one_query", AsyncMock(side_effect=_retrieve_one)),
+        ):
+            previews = await _run_retrieve(deps, ["q1"])
+
+        assert deps.full_results is not None
+        assert deps.full_results[0].texts == ["doc"]
+        assert len(previews) == 1
+        assert previews[0].texts == ["doc"]
+        assert deps.round_stats[0]["queries"] == ["q1"]
 
 
 class TestAgenticSearch:

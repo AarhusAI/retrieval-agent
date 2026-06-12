@@ -64,7 +64,10 @@ class TestReciprocalRankFusion:
 class TestBm25Cache:
     async def test_cache_prevents_repeated_scrolls(self):
         """Second call to bm25_search with same collection set should use cached index."""
-        mock_docs = [("id1", "hello world"), ("id2", "foo bar")]
+        mock_docs = [
+            ("id1", "hello world", {"source": "a.pdf"}),
+            ("id2", "foo bar", {"source": "b.pdf"}),
+        ]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
@@ -76,14 +79,54 @@ class TestBm25Cache:
         assert len(result1) > 0
         assert len(result2) > 0
 
+    async def test_results_carry_metadata(self):
+        """bm25_search returns (text, score, meta) so BM25-only hits keep provenance."""
+        mock_docs = [
+            ("id1", "hello world", {"source": "a.pdf", "collection_name": "c1"}),
+            ("id2", "foo bar", {"source": "b.pdf", "collection_name": "c1"}),
+        ]
+        with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
+            results = await bm25_search(["test-coll"], "hello", k=2)
+
+        by_text = {text: meta for text, _score, meta in results}
+        assert by_text["hello world"] == {"source": "a.pdf", "collection_name": "c1"}
+
+    async def test_zero_score_documents_are_kept(self):
+        """Zero scores must NOT be filtered: rank_bm25's IDF is 0 for a term
+        in half the corpus, so a genuinely matching doc can score 0 in a
+        small collection — filtering on score > 0 drops real keyword hits."""
+        mock_docs = [
+            ("id1", "hello world", {"source": "a.pdf"}),
+            ("id2", "completely unrelated text", {"source": "b.pdf"}),
+        ]
+        with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
+            results = await bm25_search(["test-coll"], "hello", k=5)
+
+        texts = [text for text, _score, _meta in results]
+        # "hello" has df=1 of N=2 → IDF ln(1.5/1.5)=0 → score 0; it must
+        # still come back (ranked first by the stable sort).
+        assert texts[0] == "hello world"
+        assert len(results) == 2
+
     async def test_empty_collection_returns_empty(self):
         with patch("app.services.bm25.scroll_collection_texts", return_value=[]):
             result = await bm25_search(["empty-coll"], "hello", k=2)
 
         assert result == []
 
+    async def test_empty_collection_does_not_leak_locks(self):
+        """Keys that never produce a cache entry must not leave a lock behind."""
+        from app.services.bm25 import _cache_locks
+
+        with patch("app.services.bm25.scroll_collection_texts", return_value=[]):
+            await bm25_search(["empty-coll-x"], "hello", k=2)
+            await bm25_search(["empty-coll-y"], "hello", k=2)
+
+        assert ("empty-coll-x",) not in _cache_locks
+        assert ("empty-coll-y",) not in _cache_locks
+
     async def test_different_collection_sets_have_separate_caches(self):
-        mock_docs = [("id1", "hello world")]
+        mock_docs = [("id1", "hello world", {})]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
@@ -94,7 +137,7 @@ class TestBm25Cache:
 
     async def test_cache_key_is_order_independent(self):
         """Same collection set in different orders hits the same cache entry."""
-        mock_docs = [("id1", "hello world")]
+        mock_docs = [("id1", "hello world", {})]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
@@ -111,7 +154,7 @@ class TestBm25Cache:
         miss_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "miss"}) or 0.0
         hit_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "hit"}) or 0.0
 
-        mock_docs = [("id1", "hello world")]
+        mock_docs = [("id1", "hello world", {})]
         with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
             await bm25_search(["counter-coll"], "hello", k=2)  # miss → build
             await bm25_search(["counter-coll"], "world", k=2)  # hit → cached

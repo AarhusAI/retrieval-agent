@@ -176,6 +176,67 @@ async def test_rerank_connect_error_falls_back_to_unranked():
     assert scores == [0.0, 0.0]
 
 
+async def test_rerank_timeout_falls_back_to_unranked():
+    """A hanging reranker (ReadTimeout) must fail open, not 500 the search."""
+    with patch.object(
+        httpx.AsyncClient,
+        "post",
+        new_callable=AsyncMock,
+        side_effect=httpx.ReadTimeout("timed out"),
+    ):
+        texts, _metas, scores = await rerank(
+            "query",
+            ["doc1", "doc2"],
+            [{"id": 1}, {"id": 2}],
+            k=5,
+        )
+
+    assert texts == ["doc1", "doc2"]
+    assert scores == [0.0, 0.0]
+
+
+async def test_rerank_malformed_response_falls_back_to_unranked():
+    """A 200 with an unexpected body (no 'results') must fail open."""
+    mock_response = httpx.Response(
+        200,
+        json={"unexpected": "shape"},
+        request=_FAKE_REQUEST,
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_response
+    ):
+        texts, _metas, scores = await rerank(
+            "query",
+            ["doc1", "doc2"],
+            [{"id": 1}, {"id": 2}],
+            k=5,
+        )
+
+    assert texts == ["doc1", "doc2"]
+    assert scores == [0.0, 0.0]
+
+
+async def test_rerank_score_count_mismatch_falls_back_to_unranked():
+    """Fewer scores than documents (reranker capped the list) must fail open."""
+    mock_response = httpx.Response(
+        200,
+        json={"results": [{"index": 0, "relevance_score": 0.9}]},
+        request=_FAKE_REQUEST,
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_response
+    ):
+        texts, _metas, scores = await rerank(
+            "query",
+            ["doc1", "doc2", "doc3"],
+            [{}, {}, {}],
+            k=3,
+        )
+
+    assert texts == ["doc1", "doc2", "doc3"]
+    assert scores == [0.0, 0.0, 0.0]
+
+
 async def test_rerank_failure_increments_failure_counter():
     """The fail-open path must bump reranker_failures_total."""
     from prometheus_client import REGISTRY

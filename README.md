@@ -147,7 +147,15 @@ back to the last user message).
 }
 ```
 
-Each top-level list element corresponds to one query. `distances` are normalized to `[0, 1]` (higher = more similar).
+Each top-level list element corresponds to one query. `distances` always means *higher = more similar*, but the
+**scale depends on configuration**:
+
+- dense-only retrieval — cosine similarity normalized to `[0, 1]`
+- native hybrid (sparse vectors present) — raw Qdrant RRF scores (small positive values, typically `< 0.04`)
+- reranking enabled — the cross-encoder's relevance score
+
+⚠️ If Open WebUI applies a relevance-score threshold to these values, tune it per configuration — a threshold
+calibrated for cosine scores (e.g. `0.5`) silently drops *every* result on the RRF scale.
 
 ## Configuration
 

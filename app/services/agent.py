@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -45,6 +45,17 @@ class RetrievalResult(BaseModel):
     texts: list[str]
     metadatas: list[dict]
     distances: list[float]
+
+    @model_validator(mode="after")
+    def _require_parallel_lists(self):
+        # _interleave_dedup indexes all three lists by position — a length
+        # mismatch must fail at construction, not as an IndexError mid-merge.
+        if not (len(self.texts) == len(self.metadatas) == len(self.distances)):
+            raise ValueError(
+                f"texts ({len(self.texts)}), metadatas ({len(self.metadatas)}) and "
+                f"distances ({len(self.distances)}) must have the same length"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -109,15 +120,28 @@ multiple overlapping ones.\
 """
 
 
+# Held at module level so the lifespan can close it at shutdown; the OpenAI
+# SDK does not own a caller-supplied http_client.
+_http_client: httpx.AsyncClient | None = None
+
+
 def _build_agent() -> Agent[AgentDeps, str]:
     """Build the PydanticAI agent. Called once at module level."""
+    global _http_client
+    _http_client = httpx.AsyncClient(
+        # Transport-level backstop aligned with the run-level wall clock
+        # (asyncio.wait_for in agentic_search); the OpenAI SDK may override
+        # per request, the run bound is what actually caps a hung call.
+        timeout=httpx.Timeout(settings.agent_timeout),
+        # Request hook logs the faithful LLM payload at DEBUG (app.llm).
+        event_hooks={"request": [log_llm_request]},
+    )
     model = OpenAIChatModel(
         settings.agent_model,
         provider=OpenAIProvider(
             base_url=settings.agent_api_base_url or None,
             api_key=settings.agent_api_key or None,
-            # Request hook logs the faithful LLM payload at DEBUG (app.llm).
-            http_client=httpx.AsyncClient(event_hooks={"request": [log_llm_request]}),
+            http_client=_http_client,
         ),
         profile=OpenAIModelProfile(
             openai_supports_strict_tool_definition=settings.agent_strict_tools,
@@ -144,48 +168,58 @@ def _build_agent() -> Agent[AgentDeps, str]:
 
         Returns documents, metadata, and relevance scores.
         """
-        log.info("Agent tool 'retrieve' called with %d queries", len(queries))
-        log.debug("Agent tool 'retrieve' queries: %s", queries)
-        vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
-        all_results: list[RetrievalResult] = []
-
-        for query_text, query_vector, sparse_vec in zip(
-            queries, vectors, sparse_vectors, strict=True
-        ):
-            texts, metadatas, distances = await retrieve_one_query(
-                query_text,
-                query_vector,
-                sparse_vec,
-                ctx.deps.collection_names,
-                ctx.deps.fetch_k,
-                use_native_hybrid,
-                rerank_k=ctx.deps.k,
-            )
-            log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
-            all_results.append(
-                RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
-            )
-
-        # Record this round's queries, per-query hit counts and top scores so
-        # the agent's search/retry behaviour is observable after the run.
-        ctx.deps.round_stats.append(
-            {
-                "queries": list(queries),
-                "hit_counts": [len(r.texts) for r in all_results],
-                "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
-            }
-        )
-
-        # Accumulate full results across retries (dedup happens downstream)
-        ctx.deps.full_results = (ctx.deps.full_results or []) + all_results
-
-        return _build_previews(
-            all_results,
-            max_chars=settings.agent_tool_preview_chars,
-            preview_k=settings.agent_preview_k,
-        )
+        return await _run_retrieve(ctx.deps, queries)
 
     return agent
+
+
+async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalResult]:
+    """Body of the ``retrieve`` tool, module-level so it's unit-testable."""
+    log.info("Agent tool 'retrieve' called with %d queries", len(queries))
+    log.debug("Agent tool 'retrieve' queries: %s", sanitize_for_log(queries))
+
+    if not queries:
+        # The system prompt tells the model to call retrieve([]) when no
+        # retrieval is needed (greetings, small talk). Mark full_results so
+        # the no-tool-call fallback doesn't fire, and skip the embedding
+        # round-trip — OpenAI-compatible APIs reject an empty input list.
+        deps.full_results = deps.full_results or []
+        return []
+
+    vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
+    all_results: list[RetrievalResult] = []
+
+    for query_text, query_vector, sparse_vec in zip(queries, vectors, sparse_vectors, strict=True):
+        texts, metadatas, distances = await retrieve_one_query(
+            query_text,
+            query_vector,
+            sparse_vec,
+            deps.collection_names,
+            deps.fetch_k,
+            use_native_hybrid,
+            rerank_k=deps.k,
+        )
+        log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
+        all_results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
+
+    # Record this round's queries, per-query hit counts and top scores so
+    # the agent's search/retry behaviour is observable after the run.
+    deps.round_stats.append(
+        {
+            "queries": list(queries),
+            "hit_counts": [len(r.texts) for r in all_results],
+            "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
+        }
+    )
+
+    # Accumulate full results across retries (dedup happens downstream)
+    deps.full_results = (deps.full_results or []) + all_results
+
+    return _build_previews(
+        all_results,
+        max_chars=settings.agent_tool_preview_chars,
+        preview_k=settings.agent_preview_k,
+    )
 
 
 _agent: Agent[AgentDeps, str] | None = None
@@ -196,6 +230,15 @@ def _get_agent() -> Agent[AgentDeps, str]:
     if _agent is None:
         _agent = _build_agent()
     return _agent
+
+
+async def close_client() -> None:
+    """Close the agent's httpx transport. Called from the lifespan shutdown."""
+    global _agent, _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+    _agent = None
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +533,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         len(queries),
         request.collection_names,
     )
-    log.debug("Agentic search queries: %s", queries)
+    log.debug("Agentic search queries: %s", sanitize_for_log(queries))
 
     try:
         async with metrics.time_stage("agent_loop"):

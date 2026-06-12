@@ -14,6 +14,7 @@ layer adds client-side BM25 RRF on top when hybrid is enabled but the
 collection lacks sparse vectors.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -158,7 +159,9 @@ async def vector_search(
     qdrant_collection = settings.qdrant_index
     qfilter = _collection_name_filter(collection_names)
 
-    use_hybrid = sparse_vector is not None and has_sparse_vectors()
+    # The sync QdrantClient blocks; run capability probe and query in a worker
+    # thread so a slow Qdrant call doesn't stall the whole event loop.
+    use_hybrid = sparse_vector is not None and await asyncio.to_thread(has_sparse_vectors)
 
     log.info(
         "vector_search: collections=%s (qdrant=%s, hybrid=%s) k=%d",
@@ -170,32 +173,36 @@ async def vector_search(
 
     try:
         if use_hybrid:
-            response = client.query_points(
-                collection_name=qdrant_collection,
-                prefetch=[
-                    models.Prefetch(
-                        query=query_vector,
-                        using=DENSE_VECTOR_NAME,
-                        limit=k * 2,
-                        filter=qfilter,
-                    ),
-                    models.Prefetch(
-                        query=sparse_vector,
-                        using=SPARSE_VECTOR_NAME,
-                        limit=k * 2,
-                        filter=qfilter,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                limit=k,
+            response = await asyncio.to_thread(
+                lambda: client.query_points(
+                    collection_name=qdrant_collection,
+                    prefetch=[
+                        models.Prefetch(
+                            query=query_vector,
+                            using=DENSE_VECTOR_NAME,
+                            limit=k * 2,
+                            filter=qfilter,
+                        ),
+                        models.Prefetch(
+                            query=sparse_vector,
+                            using=SPARSE_VECTOR_NAME,
+                            limit=k * 2,
+                            filter=qfilter,
+                        ),
+                    ],
+                    query=models.FusionQuery(fusion=models.Fusion.RRF),
+                    limit=k,
+                )
             )
         else:
-            response = client.query_points(
-                collection_name=qdrant_collection,
-                query=query_vector,
-                using=DENSE_VECTOR_NAME,
-                query_filter=qfilter,
-                limit=k,
+            response = await asyncio.to_thread(
+                lambda: client.query_points(
+                    collection_name=qdrant_collection,
+                    query=query_vector,
+                    using=DENSE_VECTOR_NAME,
+                    query_filter=qfilter,
+                    limit=k,
+                )
             )
     except UnexpectedResponse:
         log.exception("Qdrant query failed for collection %s", qdrant_collection)
@@ -223,21 +230,23 @@ async def vector_search(
 
 def scroll_collection_texts(
     collection_names: list[str],
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, dict]]:
     """Scroll all documents matching ``meta.collection_name IN (collection_names)``.
 
-    Returns a list of ``(point_id, text)``. Used by the BM25 fallback path to
-    build an in-memory inverted index over the relevant subset of the physical
-    collection — never the whole index. Bounded by ``BM25_MAX_DOCS`` so a
-    runaway logical collection can't OOM the process; if the cap is hit the
-    BM25 index is built on the partial set and a warning is logged.
+    Returns a list of ``(point_id, text, meta)``. Used by the BM25 fallback
+    path to build an in-memory inverted index over the relevant subset of the
+    physical collection — never the whole index; ``meta`` rides along so
+    BM25-surfaced documents keep their provenance through fusion. Bounded by
+    ``BM25_MAX_DOCS`` so a runaway logical collection can't OOM the process;
+    if the cap is hit the BM25 index is built on the partial set and a
+    warning is logged.
     """
     client = get_client()
     qdrant_collection = settings.qdrant_index
     sfilter = _collection_name_filter(collection_names)
     max_docs = settings.bm25_max_docs
 
-    results: list[tuple[str, str]] = []
+    results: list[tuple[str, str, dict]] = []
     offset = None
     while True:
         points, next_offset = client.scroll(
@@ -251,7 +260,7 @@ def scroll_collection_texts(
             payload = point.payload or {}
             text = payload.get("content", "")
             if text:
-                results.append((str(point.id), text))
+                results.append((str(point.id), text, payload.get("meta", {})))
             if len(results) >= max_docs:
                 log.warning(
                     "scroll_collection_texts hit BM25_MAX_DOCS=%d for %s; "

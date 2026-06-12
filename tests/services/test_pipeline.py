@@ -273,7 +273,7 @@ async def test_bm25_fallback_runs_when_hybrid_on_and_no_sparse(monkeypatch):
     request = SearchRequest(queries=["hello"], collection_names=["c1", "c2"], k=5)
     mock_result = QdrantResult(texts=["same text"], metadatas=[{"src": "first"}], distances=[0.9])
 
-    bm25_call = AsyncMock(return_value=[("same text", 5.0)])
+    bm25_call = AsyncMock(return_value=[("same text", 5.0, {"src": "bm25"})])
     sparse_call = AsyncMock(return_value=[None])
 
     with (
@@ -289,7 +289,31 @@ async def test_bm25_fallback_runs_when_hybrid_on_and_no_sparse(monkeypatch):
     args, _ = bm25_call.call_args
     assert args[0] == ["c1", "c2"]
     sparse_call.assert_not_called()
+    # Vector metadata wins for docs both paths surfaced.
     assert result.metadatas[0][0]["src"] == "first"
+
+
+async def test_bm25_only_documents_keep_their_metadata(monkeypatch):
+    """A doc only BM25 surfaced must carry its scrolled metadata, not {}."""
+    monkeypatch.setattr("app.services.pipeline.settings.enable_hybrid_search", True)
+
+    request = SearchRequest(queries=["hello"], collection_names=["c1"], k=5)
+    mock_result = QdrantResult(texts=["vector doc"], metadatas=[{"src": "vec"}], distances=[0.9])
+
+    bm25_call = AsyncMock(return_value=[("keyword-only doc", 5.0, {"src": "scrolled.pdf"})])
+
+    with (
+        _patch_embed([[0.1]]),
+        _patch_vsearch(mock_result),
+        _patch_has_sparse(False),
+        patch("app.services.pipeline.bm25_search", bm25_call),
+        patch(SPARSE_EMBED_PATH, AsyncMock(return_value=[None])),
+    ):
+        result = await linear_search(request)
+
+    by_text = dict(zip(result.documents[0], result.metadatas[0], strict=True))
+    assert by_text["keyword-only doc"] == {"src": "scrolled.pdf"}
+    assert by_text["vector doc"] == {"src": "vec"}
 
 
 async def test_native_hybrid_skips_client_bm25(monkeypatch):

@@ -43,6 +43,16 @@ def test_log_level_app_rejects_unknown():
         _settings(log_level_app="verbose")
 
 
+def test_embedding_base_url_rejects_empty():
+    with pytest.raises(ValidationError):
+        _settings(embedding_api_base_url="")
+
+
+def test_embedding_base_url_rejects_whitespace():
+    with pytest.raises(ValidationError):
+        _settings(embedding_api_base_url="   ")
+
+
 def test_observability_defaults():
     s = _settings()
     assert s.log_level == "INFO"

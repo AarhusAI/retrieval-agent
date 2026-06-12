@@ -102,8 +102,9 @@ def render_template(template: str, messages: list[ChatMessage]) -> str:
     walk to ``settings`` and exfiltrate upstream API keys. ``safe_substitute``
     leaves unknown ``$`` placeholders untouched rather than raising.
     """
-    # Use last 4 messages (matching Open WebUI's {{MESSAGES:END:4}})
-    recent = messages[-4:]
+    # Window matches the agentic path (default 4 — Open WebUI's
+    # {{MESSAGES:END:4}}) so both pipelines see the same history.
+    recent = messages[-settings.agent_conversation_history_messages :]
     chat_history = "\n".join(f"{m.role}: {m.content}" for m in recent)
     return Template(template).safe_substitute(
         current_date=date.today().isoformat(),

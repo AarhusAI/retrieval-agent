@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Response
@@ -72,6 +74,12 @@ async def lifespan(app: FastAPI):
     await embedding.close_client()
     await reranker.close_client()
     await query_generation.close_client()
+    # The agent module is imported lazily (pipeline only pulls in pydantic_ai
+    # when agentic mode runs) — close its transport only if it was ever loaded,
+    # without forcing the import here.
+    agent_module = sys.modules.get("app.services.agent")
+    if agent_module is not None:
+        await agent_module.close_client()
     sparse_embedding.close()
     qdrant.close_client()
     log.info("Agentic retrieval service shut down")
@@ -109,7 +117,9 @@ async def metrics(_api_key: str = Depends(verify_api_key)):
 async def health_ready():
     """Readiness probe — verifies Qdrant connectivity."""
     try:
-        qdrant.get_client().get_collections()
+        # Sync Qdrant client — probe in a worker thread so a hung Qdrant
+        # connection can't stall the event loop (and with it /health).
+        await asyncio.to_thread(lambda: qdrant.get_client().get_collections())
         return {"status": "ok"}
     except Exception as exc:
         # Log full exception server-side; surface only a generic status to
