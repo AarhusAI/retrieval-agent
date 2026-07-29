@@ -591,7 +591,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
             deps.full_results = []
 
     retrieval_results = deps.full_results or []
-    run_usage = result.usage()
+    run_usage = result.usage
     log.info(
         "Agentic search complete: %d result sets, usage=%s",
         len(retrieval_results) if retrieval_results else 0,

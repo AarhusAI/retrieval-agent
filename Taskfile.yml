@@ -185,7 +185,7 @@ tasks:
       PLATFORMS: '{{.PLATFORMS | default "linux/amd64,linux/arm64"}}'
     cmds:
       - task: build:image:builder
-      - docker buildx build --builder retrieval-agent-builder --platform {{.PLATFORMS}} --target prod -t {{.IMAGE}}:{{.TAG}} --push .
+      - docker buildx build --builder retrieval-agent-builder --platform {{.PLATFORMS}} --target prod -t {{.IMAGE}}:{{.TAG}} --push --no-cache .
 
   build:image:builder:
     desc: "Ensure the buildx builder + QEMU binfmt handlers for multi-arch builds exist (idempotent first-run setup)."

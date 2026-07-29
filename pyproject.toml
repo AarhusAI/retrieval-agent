@@ -12,7 +12,10 @@ dependencies = [
     "httpx>=0.27.0",
     "rank-bm25>=0.2.2",
     "fastembed>=0.4.0",                 # in-process sparse query embedder (BM42 / SPLADE / BGE-M3 sparse)
-    "pydantic-ai-slim[openai]>=0.2.0,<1.0",
+    # Must be >=1.50: earlier releases import the private ``opentelemetry._events``,
+    # which otel-api dropped in 1.44.0 — and pydantic-ai's own otel bound is
+    # open-ended, so a `<1.0` pin here made fresh builds die at import.
+    "pydantic-ai-slim[openai]>=2.0,<3.0",
     "prometheus-client>=0.20",          # /metrics scrape endpoint + in-process counters/histograms; single lib, no scraper code
 ]
 
