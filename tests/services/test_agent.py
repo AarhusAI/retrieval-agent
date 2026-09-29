@@ -28,7 +28,7 @@ def _make_mock_agent(full_results: list[RetrievalResult]):
     """Create a mock agent whose run() populates deps.full_results."""
     mock_agent_result = MagicMock()
     mock_agent_result.output = "done"
-    mock_agent_result.usage.return_value = _mock_usage()
+    mock_agent_result.usage = _mock_usage()
 
     async def _run(prompt, *, deps: AgentDeps, **kwargs):
         deps.full_results = full_results
@@ -195,7 +195,7 @@ class TestAgenticSearch:
             deps.full_results = (deps.full_results or []) + [drift]
             result = MagicMock()
             result.output = "done"
-            result.usage.return_value = _mock_usage()
+            result.usage = _mock_usage()
             result.all_messages.return_value = []
             return result
 
@@ -278,7 +278,7 @@ class TestAgenticSearch:
         """When agent doesn't call retrieve and embed_queries fails, returns empty results."""
         mock_agent_result = MagicMock()
         mock_agent_result.output = "I could not process that"
-        mock_agent_result.usage.return_value = _mock_usage()
+        mock_agent_result.usage = _mock_usage()
         mock_agent_result.all_messages.return_value = []
 
         mock_agent = AsyncMock()
@@ -317,7 +317,7 @@ class TestAgenticSearch:
             call_count += 1
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage()
+            mock_result.usage = _mock_usage()
             mock_result.all_messages.return_value = []
             return mock_result
 
@@ -360,7 +360,7 @@ class TestAgentRetryObservability:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage(requests=3)
+            mock_result.usage = _mock_usage(requests=3)
             mock_result.all_messages.return_value = messages
             return mock_result
 
@@ -392,7 +392,7 @@ class TestAgentRetryObservability:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage(requests=2)
+            mock_result.usage = _mock_usage(requests=2)
             mock_result.all_messages.return_value = messages
             return mock_result
 
@@ -550,7 +550,7 @@ class TestAgentRecallDecoupling:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage()
+            mock_result.usage = _mock_usage()
             mock_result.all_messages.return_value = []
             return mock_result
 

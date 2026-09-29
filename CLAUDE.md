@@ -95,7 +95,7 @@ All config via environment variables, loaded by pydantic-settings in `app/config
 ## Rules
 
 - **Never read `.env` files.** They contain secrets (API keys, credentials). Use `.env.example` to understand available settings.
-- **Always run Python commands inside the Docker container.** `pip install`, `pytest`, `ruff`, and any other project commands must be executed via `docker compose exec retrieval ...` from the repo root (or via the `task` wrapper). Never install or run Python tooling on the host.
+- **Always run Python commands inside the Docker container.** `uv sync`/`uv lock`, `pytest`, `ruff`, and any other project commands must be executed via `docker compose exec retrieval ...` from the repo root (or via the `task` wrapper). Never install or run Python tooling on the host.
 
 ## Failure-mode notes
 

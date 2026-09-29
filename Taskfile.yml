@@ -24,7 +24,12 @@ tasks:
   install:
     desc: Install project dependencies (dev)
     cmds:
-      - "{{.PYTHON}} pip install '.[dev]'"
+      - "{{.PYTHON}} uv sync --frozen --extra dev"
+
+  lock:
+    desc: "Re-lock dependencies after editing pyproject.toml (task lock -- --upgrade to bump)"
+    cmds:
+      - "{{.PYTHON}} uv lock {{.CLI_ARGS}}"
 
   setup:
     desc: First-time project setup
@@ -170,7 +175,7 @@ tasks:
   audit:deps:
     desc: Scan declared dependencies for known CVEs (pip-audit)
     cmds:
-      - "{{.PYTHON}} python -m pip_audit --strict ."
+      - "{{.PYTHON}} pip-audit --cache-dir /tmp/pip-audit-cache --strict ."
 
   audit:code:
     desc: Static security scan of app/ (bandit)

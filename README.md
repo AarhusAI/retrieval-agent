@@ -41,7 +41,8 @@ Common task commands:
 task up             # start containers
 task down           # stop containers
 task shell          # open bash shell in the retrieval container
-task install        # reinstall deps (pip install '.[dev]')
+task install        # (re)install dev deps from uv.lock (uv sync --frozen --extra dev)
+task lock           # re-lock after editing pyproject.toml (task lock -- --upgrade to bump)
 task lint           # run all linters (ruff check + format --check)
 task lint:fix       # auto-fix lint issues
 task test           # run all tests (pytest -v)

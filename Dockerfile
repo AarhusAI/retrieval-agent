@@ -5,35 +5,51 @@
 FROM python:3.12-slim-bookworm AS base
 
 # Don't write .pyc files (keeps the image lean) and flush stdout/stderr
-# so container logs surface immediately. PIP_* vars keep the layer cache
-# clean and silence pip's self-update nag in build output.
+# so container logs surface immediately.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
+
+# Pin the in-container appuser to a uid/gid that match the host developer's
+# user so ruff/pytest can write caches in the /app bind mount. Override at
+# build time for CI / other-uid hosts (compose passes APP_UID/APP_GID).
+ARG APP_UID=1000
+ARG APP_GID=1000
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
+# Dependencies come from uv.lock, so dev and prod install exactly what CI tested.
+# The venv lives outside /app because the dev bind mount (./:/app) would hide it.
+COPY --from=ghcr.io/astral-sh/uv:0.9.30 /uv /usr/local/bin/uv
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/tmp/uv-cache \
+    PATH=/opt/venv/bin:$PATH
+
+COPY pyproject.toml uv.lock ./
 
 # --- Dev target: includes test/lint tools ---
 FROM base AS dev
-RUN pip install --no-cache-dir ".[dev]"
+ARG APP_UID
+ARG APP_GID
+RUN uv sync --frozen --no-cache --no-install-project --extra dev
 COPY app/ app/
-RUN addgroup --system --gid 1000 appuser \
- && adduser --system --no-create-home --uid 1000 --gid 1000 appuser \
+RUN addgroup --system --gid ${APP_GID} appuser \
+ && adduser --system --no-create-home --uid ${APP_UID} --ingroup appuser appuser \
+ # Owned by appuser so `task install` can re-sync the venv inside the container.
+ && chown -R appuser:appuser /opt/venv \
  # /cache is the HuggingFace + fastembed model cache mount point. Docker's
  # named-volume first-mount semantics copy this directory's ownership into
  # the volume, so creating it as appuser here is what lets the non-root
  # uvicorn process write the BM42 sparse model + (optional) reranker model
  # caches inside the volume. Mirrors the ingestion-service Dockerfile.
  && mkdir -p /cache/hf /cache/fastembed \
- && chown -R appuser /cache \
- && chown -R appuser /app
+ && chown -R appuser:appuser /cache \
+ && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
 HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
@@ -41,15 +57,17 @@ CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "
 
 # --- Prod target: runtime deps only ---
 FROM base AS prod
-RUN pip install --no-cache-dir .
+ARG APP_UID
+ARG APP_GID
+RUN uv sync --frozen --no-cache --no-install-project
 COPY app/ app/
-RUN addgroup --system --gid 1000 appuser \
- && adduser --system --no-create-home --uid 1000 --gid 1000 appuser \
+RUN addgroup --system --gid ${APP_GID} appuser \
+ && adduser --system --no-create-home --uid ${APP_UID} --ingroup appuser appuser \
  # See dev-target comment — same ownership setup is required in prod for
  # the named model-cache volume to be writable by the non-root user.
  && mkdir -p /cache/hf /cache/fastembed \
- && chown -R appuser /cache \
- && chown -R appuser /app
+ && chown -R appuser:appuser /cache \
+ && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
 HEALTHCHECK CMD curl -f http://localhost:8000/health || exit 1
