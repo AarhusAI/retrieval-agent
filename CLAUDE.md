@@ -31,6 +31,7 @@ FastAPI app wired in `app/main.py` (lifespan, health probes, router include). En
 ### Dual-Input Pattern
 
 `SearchRequest` (`app/models.py`) accepts two input modes reflecting how Open WebUI calls this service:
+
 - **`queries`** — pre-formed search strings (Open WebUI's default mode). Open WebUI runs its own query generation and sends the result.
 - **`messages`** — full chat history; the service extracts/generates queries itself. When `ENABLE_QUERY_GENERATION=true` (linear pipeline) or in agentic mode, an LLM generates optimized queries from the conversation. Otherwise falls back to the last user message.
 

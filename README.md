@@ -170,7 +170,7 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `EMBEDDING_MODEL`                     | `intfloat/multilingual-e5-large`              | Must match the embedding model the ingestion service used at index time                                      |
 | `EMBEDDING_API_BASE_URL`              |                                               | OpenAI-compatible embedding endpoint                                                                         |
 | `EMBEDDING_API_KEY`                   |                                               | API key for embedding endpoint                                                                               |
-| `EMBEDDING_PREFIX_QUERY`              | `query: `                                     | Query-side prefix (must match what ingestion used; e.g. `"query: "` for e5, empty for bge-m3)                |
+| `EMBEDDING_PREFIX_QUERY`              | `query:`                                     | Query-side prefix (must match what ingestion used; e.g. `"query: "` for e5, empty for bge-m3)                |
 | `ENABLE_HYBRID_SEARCH`                | `false`                                       | Enable hybrid retrieval — native sparse+dense (when collection has `text-sparse`) or BM25 fallback otherwise |
 | `HYBRID_BM25_WEIGHT`                  | `0.3`                                         | BM25 weight in the client-side BM25 fallback fusion (vector weight = 1 − this; unused on the native path)    |
 | `BM25_CACHE_TTL_SECONDS`              | `300`                                         | TTL for the client-side BM25 index cache (only consulted on the fallback path)                               |
