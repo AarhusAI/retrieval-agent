@@ -102,6 +102,8 @@ tasks:
     cmds:
       - task: lint:check
       - task: lint:format:check
+      - task: lint:yaml
+      - task: lint:markdown
 
   lint:check:
     desc: Check code with ruff
@@ -122,6 +124,18 @@ tasks:
     desc: Check code formatting with ruff
     cmds:
       - "{{.PYTHON}} ruff format --check ."
+
+  lint:yaml:
+    desc: "Check YAML formatting with prettier (as CI does; task lint:yaml -- --write to auto-fix)"
+    cmds:
+      # Host uid/gid so --write can write to the bind mount.
+      - '{{.CONTAINER_RUNTIME}} run --rm --user $(id -u):$(id -g) -v ./:/work jauderho/prettier ''**/*.{yml,yaml}'' {{.CLI_ARGS | default "--check"}}'
+
+  lint:markdown:
+    desc: "Check Markdown with markdownlint (as CI does; task lint:markdown -- --fix to auto-fix)"
+    cmds:
+      # Host uid/gid so --fix can write to the bind mount.
+      - "{{.CONTAINER_RUNTIME}} run --rm --user $(id -u):$(id -g) -v ./:/md itkdev/markdownlint markdownlint '**/*.md' {{.CLI_ARGS}}"
 
   # ==========================================================================
   # Testing
@@ -172,7 +186,6 @@ tasks:
     cmds:
       - task: lint
       - task: test
-
 
   # ---------------------------------------------------------------------------
   # Build
