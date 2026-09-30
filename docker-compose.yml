@@ -91,3 +91,12 @@ services:
       #  HTTPS config - uncomment to enable redirect from :80 to :443
       - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.middlewares=redirect-to-https"
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+  # Used by .github/workflows/yaml.yaml. No official image yet
+  # (https://github.com/prettier/prettier/issues/15206).
+  prettier:
+    image: jauderho/prettier
+    profiles:
+      - dev
+    volumes:
+      - ./:/work
