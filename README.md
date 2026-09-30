@@ -41,7 +41,8 @@ Common task commands:
 task up             # start containers
 task down           # stop containers
 task shell          # open bash shell in the retrieval container
-task install        # reinstall deps (pip install '.[dev]')
+task install        # (re)install dev deps from uv.lock (uv sync --frozen --extra dev)
+task lock           # re-lock after editing pyproject.toml (task lock -- --upgrade to bump)
 task lint           # run all linters (ruff check + format --check)
 task lint:fix       # auto-fix lint issues
 task test           # run all tests (pytest -v)
@@ -170,7 +171,7 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `EMBEDDING_MODEL`                     | `intfloat/multilingual-e5-large`              | Must match the embedding model the ingestion service used at index time                                      |
 | `EMBEDDING_API_BASE_URL`              |                                               | OpenAI-compatible embedding endpoint                                                                         |
 | `EMBEDDING_API_KEY`                   |                                               | API key for embedding endpoint                                                                               |
-| `EMBEDDING_PREFIX_QUERY`              | `query: `                                     | Query-side prefix (must match what ingestion used; e.g. `"query: "` for e5, empty for bge-m3)                |
+| `EMBEDDING_PREFIX_QUERY`              | `query:`                                      | Query-side prefix (must match what ingestion used; e.g. `"query: "` for e5, empty for bge-m3)                |
 | `ENABLE_HYBRID_SEARCH`                | `false`                                       | Enable hybrid retrieval — native sparse+dense (when collection has `text-sparse`) or BM25 fallback otherwise |
 | `HYBRID_BM25_WEIGHT`                  | `0.3`                                         | BM25 weight in the client-side BM25 fallback fusion (vector weight = 1 − this; unused on the native path)    |
 | `BM25_CACHE_TTL_SECONDS`              | `300`                                         | TTL for the client-side BM25 index cache (only consulted on the fallback path)                               |
@@ -195,7 +196,7 @@ All settings are environment variables (or `.env` file). See [`.env.example`](.e
 | `AGENT_PREVIEW_K`                     | `5`                                           | Max previews returned to the agent per `retrieve` call (caps context-window pressure across iterations)      |
 | `AGENT_CONVERSATION_HISTORY_MESSAGES` | `4`                                           | How many trailing chat messages to include verbatim in the agent's user prompt                               |
 | `LOG_LEVEL`                           | `INFO`                                        | Root log verbosity: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (third-party libs follow it too)             |
-| `LOG_LEVEL_APP`                       | `` (inherits `LOG_LEVEL`)                     | Per-namespace override for the `app.*` loggers only; set to `DEBUG` for verbose app logs without the third-party DEBUG flood. Empty inherits `LOG_LEVEL` |
+| `LOG_LEVEL_APP`                       | `` (inherits `LOG_LEVEL`)                     | Override for `app.*` loggers only, e.g. `DEBUG` without third-party DEBUG noise; empty inherits `LOG_LEVEL`  |
 | `LOG_FORMAT`                          | `text`                                        | `text` = human-readable single line; `json` = one JSON object per line for Loki / a structured-log pipeline  |
 | `METRICS_ENABLED`                     | `true`                                        | Expose Prometheus metrics at `GET /metrics` (instrumentation always runs; `false` → endpoint returns 404)    |
 | `HOST`                                | `0.0.0.0`                                     | Server bind address                                                                                          |
@@ -354,7 +355,7 @@ Bearer-authenticated with the same `API_KEY` as `/search` — the scrape job mus
 Toggle the endpoint with `METRICS_ENABLED` (`false` → 404; instrumentation always runs regardless).
 
 | Metric | Type | Answers |
-|---|---|---|
+| --- | --- | --- |
 | `search_requests_total{pipeline,outcome,code}` | counter | how often each pipeline runs / errors |
 | `search_duration_seconds{pipeline}` | histogram | whole-request latency |
 | `retrieval_stage_duration_seconds{stage}` | histogram | which stage dominates — `query_generation`/`embed_dense`/`embed_sparse`/`qdrant`/`bm25`/`rerank`/`agent_loop` |
