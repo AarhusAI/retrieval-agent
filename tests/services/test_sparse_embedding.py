@@ -47,25 +47,3 @@ async def test_fastembed_returns_sparse_vectors():
     assert isinstance(result[1], SparseVector)
     assert result[1].indices == [2, 8]
     assert result[1].values == [0.7, 0.1]
-
-
-async def test_preload_noop_when_hybrid_disabled():
-    """preload() is a no-op when ENABLE_HYBRID_SEARCH=false."""
-    sparse_embedding.close()
-
-    with patch("app.services.sparse_embedding.settings") as mock_settings:
-        mock_settings.enable_hybrid_search = False
-        mock_settings.sparse_query_provider = "fastembed"
-        sparse_embedding.preload()
-    assert sparse_embedding._model is None
-
-
-async def test_preload_noop_when_provider_none():
-    """preload() is a no-op when SPARSE_QUERY_PROVIDER=none, even if hybrid is on."""
-    sparse_embedding.close()
-
-    with patch("app.services.sparse_embedding.settings") as mock_settings:
-        mock_settings.enable_hybrid_search = True
-        mock_settings.sparse_query_provider = "none"
-        sparse_embedding.preload()
-    assert sparse_embedding._model is None

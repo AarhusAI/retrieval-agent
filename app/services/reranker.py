@@ -4,24 +4,9 @@ import httpx
 
 from app import metrics
 from app.config import settings
+from app.http_client import bearer, get_client
 
 log = logging.getLogger(__name__)
-
-_client: httpx.AsyncClient | None = None
-
-
-def get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(timeout=30.0)
-    return _client
-
-
-async def close_client() -> None:
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
 
 
 async def rerank(
@@ -53,13 +38,10 @@ async def rerank(
         "documents": documents,
         "top_n": len(documents),  # get scores for all, we sort ourselves
     }
-    headers = {}
-    if settings.reranker_api_key:
-        headers["Authorization"] = f"Bearer {settings.reranker_api_key}"
-
     try:
-        client = get_client()
-        resp = await client.post(url, json=payload, headers=headers)
+        resp = await get_client().post(
+            url, json=payload, headers=bearer(settings.reranker_api_key)
+        )
         resp.raise_for_status()
         data = resp.json()
         # Response format: {"results": [{"index": 0, "relevance_score": 0.9}, ...]}

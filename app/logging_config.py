@@ -89,11 +89,7 @@ def configure_logging(settings: Settings) -> None:
     # Per-namespace override: make our own code ('app.*') verbose while leaving
     # third-party loggers at the root level (no httpx flood). Empty LOG_LEVEL_APP
     # -> NOTSET -> inherit the root level.
-    app_logger = logging.getLogger("app")
-    if settings.log_level_app:
-        app_logger.setLevel(getattr(logging, settings.log_level_app, logging.NOTSET))
-    else:
-        app_logger.setLevel(logging.NOTSET)
+    logging.getLogger("app").setLevel(settings.log_level_app or logging.NOTSET)
 
     # Pin noisy HTTP-client loggers to an INFO floor. ``max`` only ever quiets,
     # never amplifies: higher numeric == quieter (DEBUG=10 < INFO=20), so a

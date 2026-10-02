@@ -6,12 +6,12 @@ from app.services.agent import (
     AgentDeps,
     RetrievalResult,
     _build_previews,
-    _dedup_results,
     _parse_fallback_queries,
     _run_retrieve,
     agentic_search,
     extract_queries_from_messages,
 )
+from app.services.pipeline import dedup_topk
 
 
 def _mock_usage(input_tokens=100, output_tokens=50, requests=2, tool_calls=1):
@@ -69,7 +69,7 @@ class TestDedupResults:
             RetrievalResult(texts=["a", "b"], metadatas=[{}, {}], distances=[0.9, 0.8]),
             RetrievalResult(texts=["a", "c"], metadatas=[{}, {}], distances=[0.95, 0.7]),
         ]
-        texts, _metas, _dists = _dedup_results(results, k=10)
+        texts, _metas, _dists = dedup_topk(results, k=10)
         assert texts == ["a", "b", "c"]
 
     def test_respects_k_limit(self):
@@ -78,11 +78,11 @@ class TestDedupResults:
                 texts=["a", "b", "c"], metadatas=[{}, {}, {}], distances=[0.9, 0.8, 0.7]
             ),
         ]
-        texts, _, _ = _dedup_results(results, k=2)
+        texts, _, _ = dedup_topk(results, k=2)
         assert len(texts) == 2
 
     def test_empty_results(self):
-        texts, metas, dists = _dedup_results([], k=5)
+        texts, metas, dists = dedup_topk([], k=5)
         assert texts == []
         assert metas == []
         assert dists == []
@@ -109,7 +109,7 @@ class TestDedupResults:
                 distances=[0.13, 0.09, 0.09],
             ),
         ]
-        texts, _metas, dists = _dedup_results(results, k=3)
+        texts, _metas, dists = dedup_topk(results, k=3)
         assert "answer" in texts
         assert texts == ["toc1", "answer", "toc2"]
         assert dists == [0.80, 0.13, 0.76]

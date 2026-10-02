@@ -9,11 +9,6 @@ operator turns the endpoint on.
 ``prometheus_client`` collectors are thread-safe, so they're safe to touch from
 ``asyncio.to_thread`` workers (e.g. the BM25 scroll / Qdrant client calls).
 
-Note — there is intentionally **no** ``instrument_stage`` helper like the
-ingestion service has: that wraps a synchronous Haystack ``component.run``.
-Every retrieval stage here is an ``async def`` coroutine, so we time stages
-with the ``time_stage`` async context manager below instead.
-
 Cardinality guard: never label a metric by ``collection_name`` or query text —
 only the fixed enums declared here. ``code`` is a classified string
 (``type(exc).__name__``), never a raw exception message.
@@ -44,7 +39,6 @@ search_requests_total = Counter(
     ["pipeline", "outcome", "code"],
 )
 
-# Wall-clock of the whole /search call (query resolution → retrieval → response).
 search_duration_seconds = Histogram(
     "search_duration_seconds",
     "Whole-request search wall-clock duration in seconds.",
@@ -52,7 +46,6 @@ search_duration_seconds = Histogram(
     buckets=_REQUEST_BUCKETS,
 )
 
-# Documents returned to the caller (sum across all query result sets).
 results_returned = Histogram(
     "results_returned",
     "Number of documents returned to the caller per search request.",
@@ -72,7 +65,6 @@ retrieval_stage_duration_seconds = Histogram(
     buckets=_STAGE_BUCKETS,
 )
 
-# Candidates pulled from Qdrant for a single query, before fusion/rerank/dedup.
 candidates_fetched = Histogram(
     "candidates_fetched",
     "Candidate documents fetched from Qdrant per query (before fusion/rerank).",
@@ -87,13 +79,11 @@ hybrid_path_total = Counter(
     ["path"],
 )
 
-# Reranker fail-open events (HTTP/connection error → unranked results).
 reranker_failures_total = Counter(
     "reranker_failures_total",
     "Reranker requests that failed open and returned unranked results.",
 )
 
-# BM25 in-memory index cache effectiveness.
 bm25_cache_total = Counter(
     "bm25_cache_total",
     "BM25 index cache lookups by result.",
@@ -104,7 +94,6 @@ bm25_cache_total = Counter(
 # Agentic loop
 # ---------------------------------------------------------------------------
 
-# Model requests the agent made in a run (proxy for how much it looped).
 agent_iterations = Histogram(
     "agent_iterations",
     "Model requests per agentic run (loop length).",
@@ -118,19 +107,16 @@ agent_retries_total = Counter(
     "Agentic runs in which a corrective retry (>1 retrieve round) occurred.",
 )
 
-# The agent run hit AGENT_TIMEOUT and returned partial accumulated results.
 agent_timeouts_total = Counter(
     "agent_timeouts_total",
     "Agentic runs that timed out and returned partial results.",
 )
 
-# The model emitted queries as text instead of calling the retrieve tool.
 agent_fallback_total = Counter(
     "agent_fallback_total",
     "Agentic runs that fell back to direct search (no tool call).",
 )
 
-# Token usage attributed to searching (tool-call steps) vs grading (eval steps).
 agent_tokens_total = Counter(
     "agent_tokens_total",
     "Agent LLM tokens by step role.",

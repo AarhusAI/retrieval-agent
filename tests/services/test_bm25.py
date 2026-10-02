@@ -20,8 +20,8 @@ class TestTokenize:
 
 class TestReciprocalRankFusion:
     def test_basic_fusion(self):
-        vector = [("doc1", 0.9), ("doc2", 0.8)]
-        bm25 = [("doc2", 5.0), ("doc3", 3.0)]
+        vector = ["doc1", "doc2"]
+        bm25 = ["doc2", "doc3"]
         fused = reciprocal_rank_fusion(vector, bm25, bm25_weight=0.5, k_rrf=60)
 
         texts = [t for t, _ in fused]
@@ -34,28 +34,28 @@ class TestReciprocalRankFusion:
         assert fused == []
 
     def test_vector_only(self):
-        vector = [("doc1", 0.9), ("doc2", 0.8)]
+        vector = ["doc1", "doc2"]
         fused = reciprocal_rank_fusion(vector, [], bm25_weight=0.3)
         assert len(fused) == 2
         assert fused[0][0] == "doc1"
 
     def test_bm25_only(self):
-        bm25 = [("doc1", 5.0), ("doc2", 3.0)]
+        bm25 = ["doc1", "doc2"]
         fused = reciprocal_rank_fusion([], bm25, bm25_weight=0.3)
         assert len(fused) == 2
         assert fused[0][0] == "doc1"
 
     def test_weight_zero_ignores_bm25(self):
-        vector = [("doc1", 0.9)]
-        bm25 = [("doc2", 5.0)]
+        vector = ["doc1"]
+        bm25 = ["doc2"]
         fused = reciprocal_rank_fusion(vector, bm25, bm25_weight=0.0)
         # doc2 gets 0 weight from bm25, so only doc1 has score
         scores = {t: s for t, s in fused}
         assert scores["doc2"] == 0.0
 
     def test_scores_are_descending(self):
-        vector = [("a", 1.0), ("b", 0.5), ("c", 0.1)]
-        bm25 = [("c", 10.0), ("b", 5.0), ("a", 1.0)]
+        vector = ["a", "b", "c"]
+        bm25 = ["c", "b", "a"]
         fused = reciprocal_rank_fusion(vector, bm25, bm25_weight=0.5)
         scores = [s for _, s in fused]
         assert scores == sorted(scores, reverse=True)
@@ -65,8 +65,8 @@ class TestBm25Cache:
     async def test_cache_prevents_repeated_scrolls(self):
         """Second call to bm25_search with same collection set should use cached index."""
         mock_docs = [
-            ("id1", "hello world", {"source": "a.pdf"}),
-            ("id2", "foo bar", {"source": "b.pdf"}),
+            ("hello world", {"source": "a.pdf"}),
+            ("foo bar", {"source": "b.pdf"}),
         ]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
@@ -82,8 +82,8 @@ class TestBm25Cache:
     async def test_results_carry_metadata(self):
         """bm25_search returns (text, score, meta) so BM25-only hits keep provenance."""
         mock_docs = [
-            ("id1", "hello world", {"source": "a.pdf", "collection_name": "c1"}),
-            ("id2", "foo bar", {"source": "b.pdf", "collection_name": "c1"}),
+            ("hello world", {"source": "a.pdf", "collection_name": "c1"}),
+            ("foo bar", {"source": "b.pdf", "collection_name": "c1"}),
         ]
         with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
             results = await bm25_search(["test-coll"], "hello", k=2)
@@ -96,8 +96,8 @@ class TestBm25Cache:
         in half the corpus, so a genuinely matching doc can score 0 in a
         small collection — filtering on score > 0 drops real keyword hits."""
         mock_docs = [
-            ("id1", "hello world", {"source": "a.pdf"}),
-            ("id2", "completely unrelated text", {"source": "b.pdf"}),
+            ("hello world", {"source": "a.pdf"}),
+            ("completely unrelated text", {"source": "b.pdf"}),
         ]
         with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
             results = await bm25_search(["test-coll"], "hello", k=5)
@@ -126,7 +126,7 @@ class TestBm25Cache:
         assert ("empty-coll-y",) not in _cache_locks
 
     async def test_different_collection_sets_have_separate_caches(self):
-        mock_docs = [("id1", "hello world", {})]
+        mock_docs = [("hello world", {})]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
@@ -137,7 +137,7 @@ class TestBm25Cache:
 
     async def test_cache_key_is_order_independent(self):
         """Same collection set in different orders hits the same cache entry."""
-        mock_docs = [("id1", "hello world", {})]
+        mock_docs = [("hello world", {})]
         with patch(
             "app.services.bm25.scroll_collection_texts", return_value=mock_docs
         ) as mock_scroll:
@@ -154,7 +154,7 @@ class TestBm25Cache:
         miss_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "miss"}) or 0.0
         hit_before = REGISTRY.get_sample_value("bm25_cache_total", {"result": "hit"}) or 0.0
 
-        mock_docs = [("id1", "hello world", {})]
+        mock_docs = [("hello world", {})]
         with patch("app.services.bm25.scroll_collection_texts", return_value=mock_docs):
             await bm25_search(["counter-coll"], "hello", k=2)  # miss → build
             await bm25_search(["counter-coll"], "world", k=2)  # hit → cached
