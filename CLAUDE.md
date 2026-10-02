@@ -57,7 +57,7 @@ FastAPI app wired in `app/main.py` (lifespan, health probes, router include). En
 
 **Linear pipeline** (`linear_search`): query resolution → embed (dense + optional sparse) → single Qdrant query per
 dense query, scoped to all `collection_names` via a `meta.collection_name IN (...)` filter → optional hybrid fusion (see
-below) → optional cross-encoder rerank → dedup by MD5 → top-k. See `README.md` for the diagram. The pre-Phase-3
+below) → optional cross-encoder rerank → dedup by text → top-k. See `README.md` for the diagram. The pre-Phase-3
 per-collection `asyncio.gather` is gone — one logical query is one Qdrant call.
 
 **Agentic pipeline** (`app/services/agent.py`): a PydanticAI `Agent` with a `retrieve` tool wrapping the same
@@ -70,11 +70,11 @@ Several pieces of agent behaviour worth knowing because they are not obvious fro
   `retrieve` tool returns only previews to the LLM — text truncated to `AGENT_TOOL_PREVIEW_CHARS`, metadata reduced to
   `source`. The final pipeline output comes from `full_results`, not from anything the LLM sees. This keeps token usage
   low on small-context models.
-- **Cross-query interleave.** Both the previews (`_build_previews`) and the final payload (`_dedup_results`) merge the
-  per-query result sets **round-robin** via `_interleave_dedup` (position 0 = each query's best — each set is already
-  rerank-sorted — score-descending tiebreak, MD5 dedup), _not_ first-query-then-second. This stops one query (e.g. a
-  drifted reformulation that matches document boilerplate) from monopolising a small `k` and starving a relevant chunk
-  another query surfaced. There is deliberately **no** global score re-sort and **no** score floor, so a
+- **Cross-query interleave.** Both the previews (`_build_previews`) and the final payload (`dedup_topk`) merge the
+  per-query result sets **round-robin** via `pipeline.interleave_dedup` (position 0 = each query's best — each set is
+  already rerank-sorted — score-descending tiebreak, exact-text dedup), _not_ first-query-then-second. This stops one
+  query (e.g. a drifted reformulation that matches document boilerplate) from monopolising a small `k` and starving a
+  relevant chunk another query surfaced. There is deliberately **no** global score re-sort and **no** score floor, so a
   reranker-underscored-but-relevant chunk stays near the front where a downstream `top_k`/threshold can't silently drop
   it.
 - **Raw-query seed.** With `AGENT_INCLUDE_RAW_QUERY` (default on), `agentic_search` runs one deterministic retrieval

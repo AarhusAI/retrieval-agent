@@ -53,16 +53,6 @@ _cache: OrderedDict[CacheKey, _CacheEntry] = OrderedDict()
 _cache_locks: OrderedDict[CacheKey, asyncio.Lock] = OrderedDict()
 
 
-def _make_key(collection_names: list[str]) -> CacheKey:
-    return tuple(sorted(collection_names))
-
-
-def _get_lock(key: CacheKey) -> asyncio.Lock:
-    if key not in _cache_locks:
-        _cache_locks[key] = asyncio.Lock()
-    return _cache_locks[key]
-
-
 def clear_cache() -> None:
     """Clear the BM25 cache (for testing)."""
     _cache.clear()
@@ -73,16 +63,11 @@ async def _get_or_build_index(
     collection_names: list[str],
 ) -> tuple[BM25Okapi, tuple[str, ...], tuple[dict, ...]] | None:
     """Get cached BM25 index or build a new one. Returns ``None`` for empty result sets."""
-    key = _make_key(collection_names)
+    key = tuple(sorted(collection_names))
     now = time.monotonic()
-    entry = _cache.get(key)
-    if entry is not None and entry.expires_at > now:
-        metrics.bm25_cache_total.labels(result="hit").inc()
-        return entry.bm25, entry.texts, entry.metas
-
-    lock = _get_lock(key)
-    async with lock:
-        # Double-check after acquiring lock
+    # Uncontended asyncio locks are cheap; holding one for the lookup too means
+    # concurrent misses for the same key build the index only once.
+    async with _cache_locks.setdefault(key, asyncio.Lock()):
         entry = _cache.get(key)
         if entry is not None and entry.expires_at > now:
             metrics.bm25_cache_total.labels(result="hit").inc()
@@ -97,7 +82,7 @@ async def _get_or_build_index(
             _cache_locks.pop(key, None)
             return None
 
-        _ids, texts, metas = zip(*docs, strict=True)
+        texts, metas = zip(*docs, strict=True)
         tokenized = [_tokenize(t) for t in texts]
         bm25 = BM25Okapi(tokenized)
 
@@ -153,23 +138,17 @@ async def bm25_search(
 
 
 def reciprocal_rank_fusion(
-    vector_results: list[tuple[str, float]],
-    bm25_results: list[tuple[str, float]],
+    vector_texts: list[str],
+    bm25_texts: list[str],
     bm25_weight: float,
     k_rrf: int = 60,
 ) -> list[tuple[str, float]]:
-    """Fuse vector and BM25 ranked lists using Reciprocal Rank Fusion.
+    """Fuse two rank-ordered text lists with Reciprocal Rank Fusion.
 
-    Returns merged list sorted by fused score descending.
+    Returns ``(text, fused_score)`` sorted by fused score descending.
     """
-    vector_weight = 1.0 - bm25_weight
     scores: dict[str, float] = {}
-
-    for rank, (text, _) in enumerate(vector_results):
-        scores[text] = scores.get(text, 0.0) + vector_weight / (k_rrf + rank + 1)
-
-    for rank, (text, _) in enumerate(bm25_results):
-        scores[text] = scores.get(text, 0.0) + bm25_weight / (k_rrf + rank + 1)
-
-    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return fused
+    for texts, weight in ((vector_texts, 1.0 - bm25_weight), (bm25_texts, bm25_weight)):
+        for rank, text in enumerate(texts):
+            scores[text] = scores.get(text, 0.0) + weight / (k_rrf + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)

@@ -30,9 +30,10 @@ os.environ["METRICS_ENABLED"] = "true"
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import http_client
 from app.config import settings
 from app.main import app
-from app.services import bm25, embedding, qdrant, query_generation, reranker, sparse_embedding
+from app.services import bm25, qdrant, query_generation, sparse_embedding
 
 # Force settings to match test env. Settings() is instantiated at import time,
 # so attribute reassignment is the only reliable way to override fields when the
@@ -66,8 +67,7 @@ def reset_clients():
     yield
     qdrant._client = None
     qdrant.reset_sparse_capability()
-    embedding._client = None
-    reranker._client = None
+    http_client._client = None
     query_generation._client = None
     sparse_embedding.close()
     bm25.clear_cache()

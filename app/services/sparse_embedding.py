@@ -1,9 +1,9 @@
 """Sparse query embedder for native Qdrant hybrid retrieval.
 
 Uses ``fastembed`` in-process — no external API call, but the model weights
-are downloaded on first construction. The :func:`preload` hook is called from
-``app.main``'s lifespan when hybrid is enabled, so first chat query doesn't
-pay the model-load cost.
+are downloaded on first construction. ``app.main``'s lifespan calls :func:`get_model`
+eagerly when hybrid is enabled, so first chat query doesn't pay the
+model-load cost.
 
 Disabled when ``SPARSE_QUERY_PROVIDER=none`` (``embed_queries`` returns a list
 of ``None`` of the same length as the input). The pipeline / agent layer
@@ -43,19 +43,6 @@ def get_model() -> SparseTextEmbedding | None:
         _model = SparseTextEmbedding(model_name=settings.sparse_query_model)
         log.info("Loaded fastembed sparse model: %s", settings.sparse_query_model)
     return _model
-
-
-def preload() -> None:
-    """Eagerly construct the model. No-op when hybrid or the provider is disabled.
-
-    Called from the FastAPI lifespan so the model download / import is done
-    before any requests reach the service.
-    """
-    if not settings.enable_hybrid_search:
-        return
-    if settings.sparse_query_provider.lower() == "none":
-        return
-    get_model()
 
 
 def close() -> None:

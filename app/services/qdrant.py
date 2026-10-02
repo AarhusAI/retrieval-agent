@@ -16,13 +16,13 @@ collection lacks sparse vectors.
 
 import asyncio
 import logging
-from dataclasses import dataclass
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.config import settings
 from app.log_utils import sanitize_for_log
+from app.models import RetrievalResult
 
 log = logging.getLogger(__name__)
 
@@ -32,13 +32,6 @@ log = logging.getLogger(__name__)
 # "text-sparse".
 DENSE_VECTOR_NAME = "text-dense"
 SPARSE_VECTOR_NAME = "text-sparse"
-
-
-@dataclass
-class QdrantResult:
-    texts: list[str]
-    metadatas: list[dict]
-    distances: list[float]
 
 
 # ---------------------------------------------------------------------------
@@ -72,11 +65,10 @@ def close_client() -> None:
 _sparse_capable: bool | None = None
 
 
-def collection_exists(collection_name: str | None = None) -> bool:
+def collection_exists() -> bool:
     """True iff the configured Qdrant collection currently exists."""
-    name = collection_name or settings.qdrant_index
     try:
-        get_client().get_collection(name)
+        get_client().get_collection(settings.qdrant_index)
         return True
     except (UnexpectedResponse, ValueError):
         return False
@@ -144,7 +136,7 @@ async def vector_search(
     query_vector: list[float],
     sparse_vector: models.SparseVector | None,
     k: int,
-) -> QdrantResult:
+) -> RetrievalResult:
     """Query the configured Qdrant collection.
 
     * Single physical Qdrant collection (``settings.qdrant_index``).
@@ -152,7 +144,7 @@ async def vector_search(
     * Hybrid (dense + sparse, RRF-fused server-side) when ``sparse_vector`` is
       provided AND the collection has sparse vectors. Dense-only fallback
       otherwise.
-    * Returns ``QdrantResult``. Distances are normalized cosine for the dense
+    * Returns ``RetrievalResult``. Distances are normalized cosine for the dense
       path (``(score + 1) / 2``) and raw RRF scores for the hybrid path.
     """
     client = get_client()
@@ -206,7 +198,7 @@ async def vector_search(
             )
     except UnexpectedResponse:
         log.exception("Qdrant query failed for collection %s", qdrant_collection)
-        return QdrantResult(texts=[], metadatas=[], distances=[])
+        return RetrievalResult(texts=[], metadatas=[], distances=[])
 
     texts: list[str] = []
     metadatas: list[dict] = []
@@ -220,7 +212,7 @@ async def vector_search(
         # Hybrid path: RRF score is already a positive rank-fusion score.
         distances.append(score if use_hybrid else (score + 1.0) / 2.0)
 
-    return QdrantResult(texts=texts, metadatas=metadatas, distances=distances)
+    return RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +220,10 @@ async def vector_search(
 # ---------------------------------------------------------------------------
 
 
-def scroll_collection_texts(
-    collection_names: list[str],
-) -> list[tuple[str, str, dict]]:
+def scroll_collection_texts(collection_names: list[str]) -> list[tuple[str, dict]]:
     """Scroll all documents matching ``meta.collection_name IN (collection_names)``.
 
-    Returns a list of ``(point_id, text, meta)``. Used by the BM25 fallback
+    Returns a list of ``(text, meta)``. Used by the BM25 fallback
     path to build an in-memory inverted index over the relevant subset of the
     physical collection — never the whole index; ``meta`` rides along so
     BM25-surfaced documents keep their provenance through fusion. Bounded by
@@ -246,7 +236,7 @@ def scroll_collection_texts(
     sfilter = _collection_name_filter(collection_names)
     max_docs = settings.bm25_max_docs
 
-    results: list[tuple[str, str, dict]] = []
+    results: list[tuple[str, dict]] = []
     offset = None
     while True:
         points, next_offset = client.scroll(
@@ -260,7 +250,7 @@ def scroll_collection_texts(
             payload = point.payload or {}
             text = payload.get("content", "")
             if text:
-                results.append((str(point.id), text, payload.get("meta", {})))
+                results.append((text, payload.get("meta", {})))
             if len(results) >= max_docs:
                 log.warning(
                     "scroll_collection_texts hit BM25_MAX_DOCS=%d for %s; "

@@ -7,11 +7,12 @@ from fastapi import Depends, FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app import http_client
 from app.auth import verify_api_key
 from app.config import settings
 from app.logging_config import configure_logging
 from app.routes.search import router as search_router
-from app.services import embedding, qdrant, query_generation, reranker, sparse_embedding
+from app.services import qdrant, query_generation, sparse_embedding
 
 configure_logging(settings)
 log = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
             sparse_present,
         )
         if settings.enable_hybrid_search and sparse_present:
-            sparse_embedding.preload()
+            sparse_embedding.get_model()
     else:
         log.warning(
             "Qdrant collection %r does not exist yet; sparse capability "
@@ -71,8 +72,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await embedding.close_client()
-    await reranker.close_client()
+    await http_client.close_client()
     await query_generation.close_client()
     # The agent module is imported lazily (pipeline only pulls in pydantic_ai
     # when agentic mode runs) — close its transport only if it was ever loaded,

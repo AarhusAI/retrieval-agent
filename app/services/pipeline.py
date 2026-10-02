@@ -14,16 +14,17 @@ When ``ENABLE_HYBRID_SEARCH`` is on:
 """
 
 import asyncio
-import hashlib
 import logging
 import time
+from collections.abc import Iterator
+from itertools import chain, islice
 
 from qdrant_client.http.models import SparseVector
 
 from app import metrics
 from app.config import settings
 from app.log_utils import sanitize_for_log
-from app.models import ChatMessage, SearchRequest, SearchResponse
+from app.models import ChatMessage, RetrievalResult, SearchRequest, SearchResponse
 from app.services import embedding, qdrant, sparse_embedding
 from app.services.bm25 import bm25_search, reciprocal_rank_fusion
 from app.services.reranker import rerank
@@ -109,9 +110,7 @@ async def retrieve_one_query(
             sparse_vec,
             fetch_k,
         )
-    texts = list(result.texts)
-    metadatas = list(result.metadatas)
-    distances = list(result.distances)
+    texts, metadatas, distances = result.texts, result.metadatas, result.distances
     metrics.candidates_fetched.observe(len(texts))
     log.debug(
         "retrieve_one_query q=%s candidates=%d top_scores=%s",
@@ -122,20 +121,16 @@ async def retrieve_one_query(
 
     if settings.enable_hybrid_search and not use_native_hybrid and texts:
         async with metrics.time_stage("bm25"):
-            vector_ranked = list(zip(texts, distances, strict=True))
             bm25_results = await bm25_search(collection_names, query_text, fetch_k)
             fused = reciprocal_rank_fusion(
-                vector_ranked,
-                [(text, score) for text, score, _ in bm25_results],
-                settings.hybrid_bm25_weight,
+                texts, [text for text, _, _ in bm25_results], settings.hybrid_bm25_weight
             )
             # Vector metadata wins; BM25 triples fill in provenance for docs
             # only BM25 surfaced (they were never in the vector result set).
             text_to_meta: dict[str, dict] = {}
-            for text, meta in zip(texts, metadatas, strict=True):
-                if text not in text_to_meta:
-                    text_to_meta[text] = meta
-            for text, _score, meta in bm25_results:
+            for text, meta in chain(
+                zip(texts, metadatas, strict=True), ((t, m) for t, _, m in bm25_results)
+            ):
                 text_to_meta.setdefault(text, meta)
             texts = [text for text, _ in fused]
             distances = [score for _, score in fused]
@@ -148,30 +143,44 @@ async def retrieve_one_query(
     return texts, metadatas, distances
 
 
-def _dedup_topk(
-    texts: list[str],
-    metadatas: list[dict],
-    distances: list[float],
-    k: int,
-) -> tuple[list[str], list[dict], list[float]]:
-    """Dedup by text content hash (MD5), preserving order, limited to k."""
+def interleave_dedup(results: list[RetrievalResult]) -> Iterator[tuple[str, dict, float]]:
+    """Yield ``(text, meta, dist)`` round-robin across per-query result sets.
+
+    Each result set is already rerank-sorted, so position 0 is each query's
+    *best* hit. Interleaving by position gives every query fair representation
+    instead of letting the first query monopolise a small ``k`` — the bug where
+    one query's results filled the budget and a relevant chunk from a later
+    query was dropped before it was ever considered. Within a position, the
+    higher-scored candidate is yielded first (score is the tiebreak). Duplicate
+    texts are emitted once, keeping the first (highest-position, highest-score)
+    occurrence. A single result set is simply deduped in order.
+
+    Order is intentionally *not* re-sorted globally by score: a relevant chunk
+    that the reranker under-scores must stay near the front so a downstream
+    top-k / threshold can't silently re-drop it.
+    """
     seen: set[str] = set()
-    deduped_texts: list[str] = []
-    deduped_metadatas: list[dict] = []
-    deduped_distances: list[float] = []
+    max_len = max((len(r.texts) for r in results), default=0)
+    for pos in range(max_len):
+        # Every query's candidate at this rank, best score first.
+        row = [
+            (r.distances[pos], r.texts[pos], r.metadatas[pos])
+            for r in results
+            if pos < len(r.texts)
+        ]
+        row.sort(key=lambda x: x[0], reverse=True)
+        for dist, text, meta in row:
+            if text not in seen:
+                seen.add(text)
+                yield text, meta, dist
 
-    for text, meta, dist in zip(texts, metadatas, distances, strict=True):
-        text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
-        if text_hash in seen:
-            continue
-        seen.add(text_hash)
-        deduped_texts.append(text)
-        deduped_metadatas.append(meta)
-        deduped_distances.append(dist)
-        if len(deduped_texts) >= k:
-            break
 
-    return deduped_texts, deduped_metadatas, deduped_distances
+def dedup_topk(
+    results: list[RetrievalResult], k: int
+) -> tuple[list[str], list[dict], list[float]]:
+    """First ``k`` of :func:`interleave_dedup`, as parallel lists."""
+    rows = list(islice(interleave_dedup(results), k))
+    return [r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows]
 
 
 async def linear_search(request: SearchRequest) -> SearchResponse:
@@ -196,30 +205,26 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
 
     vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
 
-    async def _one_query(
-        query_text: str,
-        query_vector: list[float],
-        sparse_vec: SparseVector | None,
-    ) -> tuple[list[str], list[dict], list[float]]:
-        merged_texts, merged_metadatas, merged_distances = await retrieve_one_query(
-            query_text,
-            query_vector,
-            sparse_vec,
-            request.collection_names,
-            fetch_k,
-            use_native_hybrid,
-            rerank_k=k,
-        )
-        return _dedup_topk(merged_texts, merged_metadatas, merged_distances, k)
-
-    per_query = await asyncio.gather(
+    retrieved = await asyncio.gather(
         *(
-            _one_query(query_text, query_vector, sparse_vec)
+            retrieve_one_query(
+                query_text,
+                query_vector,
+                sparse_vec,
+                request.collection_names,
+                fetch_k,
+                use_native_hybrid,
+                rerank_k=k,
+            )
             for query_text, query_vector, sparse_vec in zip(
                 queries, vectors, sparse_vectors, strict=True
             )
         )
     )
+    per_query = [
+        dedup_topk([RetrievalResult(texts=t, metadatas=m, distances=d)], k)
+        for t, m, d in retrieved
+    ]
 
     return SearchResponse(
         documents=[texts for texts, _, _ in per_query],
@@ -240,9 +245,6 @@ async def _resolve_queries(request: SearchRequest) -> list[str]:
                 request.messages,
                 template_override=request.retrieval_query_generation_prompt_template,
             )
-        if queries:
-            log.info("Generated %d queries from messages", len(queries))
-            log.debug("Generated queries: %s", sanitize_for_log(queries))
 
     if not queries:
         queries = request.queries or []

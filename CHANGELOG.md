@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 - Per-query retrieval runs concurrently in the linear pipeline.
 - Auth returns 401 with `WWW-Authenticate` on missing/invalid credentials (was 403).
 - Query generation honours `AGENT_CONVERSATION_HISTORY_MESSAGES`.
+- Simplified app code (about 260 fewer lines): embedding and reranker share one HTTP client, both pipelines share one
+  dedup helper (exact-text instead of MD5), the agent's three per-query retrieval loops are one helper, and
+  `QdrantResult` is merged into `RetrievalResult`.
+- Request validation uses pydantic's built-in `max_length`/`pattern` checks, so 422 messages use pydantic's wording.
+- The agent fallback parser takes the outermost `{...}` in the output, covering plain JSON and `[TOOL_CALLS]` text.
+- `API_KEY` placeholder list removed; the 32-character minimum already rejects every entry.
 
 ### Fixed
 
