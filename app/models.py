@@ -35,6 +35,17 @@ class RetrievalResult(BaseModel):
     metadatas: list[dict]
     distances: list[float]
 
+    @model_validator(mode="after")
+    def require_parallel_lists(self):
+        # interleave_dedup indexes all three lists by position — a mismatch must
+        # fail here, not as an IndexError or silent truncation mid-merge.
+        if not (len(self.texts) == len(self.metadatas) == len(self.distances)):
+            raise ValueError(
+                f"texts ({len(self.texts)}), metadatas ({len(self.metadatas)}) and "
+                f"distances ({len(self.distances)}) must have the same length"
+            )
+        return self
+
 
 class SearchResponse(BaseModel):
     documents: list[list[str]]

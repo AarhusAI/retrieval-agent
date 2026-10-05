@@ -234,10 +234,12 @@ async def close_client() -> None:
 def _parse_fallback_queries(output: str) -> list[str] | None:
     """Try to extract queries from agent text output (when it skips tool calling).
 
-    Takes the outermost ``{...}`` in the output, which covers both plain JSON
+    Takes the outermost ``{...}`` after the last ``[TOOL_CALLS]`` marker (or in
+    the whole output when absent), which covers both plain JSON
     (``{"queries": [...]}``) and Mistral tool-call text
-    (``[TOOL_CALLS]retrieve{"queries": [...]}``).
+    (``[TOOL_CALLS]retrieve{"queries": [...]}``) even with braces in prose before it.
     """
+    output = output.split("[TOOL_CALLS]")[-1]
     try:
         data = json.loads(output[output.index("{") : output.rindex("}") + 1])
     except (ValueError, TypeError):  # no braces, or invalid JSON

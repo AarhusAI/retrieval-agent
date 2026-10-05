@@ -1,5 +1,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from pydantic import ValidationError
+
 from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
@@ -80,6 +83,13 @@ class TestDedupResults:
         ]
         texts, _, _ = dedup_topk(results, k=2)
         assert len(texts) == 2
+
+    def test_rejects_mismatched_parallel_lists(self):
+        """Mismatched lengths would crash or silently drop data in interleave_dedup."""
+        with pytest.raises(ValidationError):
+            RetrievalResult(texts=["a", "b"], metadatas=[{}], distances=[0.9, 0.8])
+        with pytest.raises(ValidationError):
+            RetrievalResult(texts=["a"], metadatas=[{}, {}], distances=[0.9, 0.8])
 
     def test_empty_results(self):
         texts, metas, dists = dedup_topk([], k=5)
@@ -596,6 +606,11 @@ class TestParseFallbackQueries:
         output = '[TOOL_CALLS]retrieve{"queries": ["test query"]} some trailing text'
         result = _parse_fallback_queries(output)
         assert result == ["test query"]
+
+    def test_mistral_tool_calls_with_braces_in_prose(self):
+        """Braces in prose before [TOOL_CALLS] must not hijack the JSON slice."""
+        output = 'I used {braces}. [TOOL_CALLS]retrieve{"queries": ["q1"]}'
+        assert _parse_fallback_queries(output) == ["q1"]
 
     def test_plain_json(self):
         output = '{"queries": ["q1", "q2"]}'
