@@ -6,16 +6,13 @@ retrieval, and corrective relevance grading with retry.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
-import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
+from itertools import islice
 
 import httpx
-from pydantic import BaseModel, model_validator
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -24,38 +21,16 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from app import metrics
 from app.config import settings
 from app.log_utils import log_llm_request, sanitize_for_log
-from app.models import SearchRequest, SearchResponse
+from app.models import RetrievalResult, SearchRequest, SearchResponse
 from app.services.pipeline import (
+    dedup_topk,
     embed_dense_and_sparse,
     extract_queries_from_messages,
+    interleave_dedup,
     retrieve_one_query,
 )
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Structured output models
-# ---------------------------------------------------------------------------
-
-
-class RetrievalResult(BaseModel):
-    """Result from a single retrieval pass."""
-
-    texts: list[str]
-    metadatas: list[dict]
-    distances: list[float]
-
-    @model_validator(mode="after")
-    def _require_parallel_lists(self):
-        # _interleave_dedup indexes all three lists by position — a length
-        # mismatch must fail at construction, not as an IndexError mid-merge.
-        if not (len(self.texts) == len(self.metadatas) == len(self.distances)):
-            raise ValueError(
-                f"texts ({len(self.texts)}), metadatas ({len(self.metadatas)}) and "
-                f"distances ({len(self.distances)}) must have the same length"
-            )
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +148,30 @@ def _build_agent() -> Agent[AgentDeps, str]:
     return agent
 
 
+async def _retrieve_all(
+    queries: list[str],
+    collection_names: list[str],
+    fetch_k: int,
+    rerank_k: int | None,
+) -> list[RetrievalResult]:
+    """Embed ``queries`` and run one retrieval per query, in order."""
+    vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
+    results: list[RetrievalResult] = []
+    for query_text, query_vector, sparse_vec in zip(queries, vectors, sparse_vectors, strict=True):
+        texts, metadatas, distances = await retrieve_one_query(
+            query_text,
+            query_vector,
+            sparse_vec,
+            collection_names,
+            fetch_k,
+            use_native_hybrid,
+            rerank_k=rerank_k,
+        )
+        log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
+        results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
+    return results
+
+
 async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalResult]:
     """Body of the ``retrieve`` tool, module-level so it's unit-testable."""
     log.info("Agent tool 'retrieve' called with %d queries", len(queries))
@@ -186,21 +185,7 @@ async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalRe
         deps.full_results = deps.full_results or []
         return []
 
-    vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
-    all_results: list[RetrievalResult] = []
-
-    for query_text, query_vector, sparse_vec in zip(queries, vectors, sparse_vectors, strict=True):
-        texts, metadatas, distances = await retrieve_one_query(
-            query_text,
-            query_vector,
-            sparse_vec,
-            deps.collection_names,
-            deps.fetch_k,
-            use_native_hybrid,
-            rerank_k=deps.k,
-        )
-        log.debug("Retrieve for %r: %d documents found", query_text, len(texts))
-        all_results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
+    all_results = await _retrieve_all(queries, deps.collection_names, deps.fetch_k, deps.k)
 
     # Record this round's queries, per-query hit counts and top scores so
     # the agent's search/retry behaviour is observable after the run.
@@ -249,33 +234,19 @@ async def close_client() -> None:
 def _parse_fallback_queries(output: str) -> list[str] | None:
     """Try to extract queries from agent text output (when it skips tool calling).
 
-    Handles two formats:
-    - Plain JSON: {"queries": ["q1", "q2"]}
-    - Mistral tool-call text: [TOOL_CALLS]retrieve{"queries": ["q1", "q2"]}
+    Takes the outermost ``{...}`` after the last ``[TOOL_CALLS]`` marker (or in
+    the whole output when absent), which covers both plain JSON
+    (``{"queries": [...]}``) and Mistral tool-call text
+    (``[TOOL_CALLS]retrieve{"queries": [...]}``) even with braces in prose before it.
     """
-    # Try plain JSON first
+    output = output.split("[TOOL_CALLS]")[-1]
     try:
-        data = json.loads(output)
-        if isinstance(data, dict) and "queries" in data:
-            return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Handle Mistral-style [TOOL_CALLS]function_name{...} format
-    match = re.search(r"\[TOOL_CALLS\]\w+(\{.+)", output, re.DOTALL)
-    if match:
-        try:
-            raw = match.group(1)
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start != -1 and end > 0:
-                data = json.loads(raw[start:end])
-                if isinstance(data, dict) and "queries" in data:
-                    return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    return None
+        data = json.loads(output[output.index("{") : output.rindex("}") + 1])
+    except (ValueError, TypeError):  # no braces, or invalid JSON
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("queries"), list):
+        return None
+    return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
 
 
 _PREVIEW_META_FIELDS: tuple[str, ...] = (
@@ -298,58 +269,13 @@ def _preview_meta(meta: dict) -> dict:
     document's own title from extractor metadata) and ``languages`` (detected
     language codes) are extra topical and language-match signals.
 
-    Missing / empty / falsy values are dropped so the LLM doesn't burn context
-    on ``"page": null`` or ``"headers": []``. The full meta still flows
-    through ``deps.full_results`` to the final ``SearchResponse``; this is
-    purely about what the agent sees mid-loop.
+    Empty values are dropped so the LLM doesn't burn context on
+    ``"page": null``; ``source`` is always present (``""`` if unset). The full
+    meta still flows through ``deps.full_results`` to the final response.
     """
-    out: dict = {}
-    for key in _PREVIEW_META_FIELDS:
-        value = meta.get(key)
-        if value in (None, "", [], {}):
-            continue
-        out[key] = value
-    # ``source`` is the only field every preview should carry — keep an empty
-    # string if it wasn't set, matching the previous contract.
-    if "source" not in out:
-        out["source"] = ""
+    out = {f: meta[f] for f in _PREVIEW_META_FIELDS if meta.get(f) not in (None, "", [], {})}
+    out.setdefault("source", "")
     return out
-
-
-def _interleave_dedup(
-    results: list[RetrievalResult],
-) -> Iterator[tuple[str, dict, float]]:
-    """Yield ``(text, meta, dist)`` round-robin across per-query result sets.
-
-    Each result set is already rerank-sorted, so position 0 is each query's
-    *best* hit. Interleaving by position gives every query fair representation
-    instead of letting the first query monopolise a small ``k`` — the bug where
-    one query's results filled the budget and a relevant chunk from a later
-    query was dropped before it was ever considered. Within a position, the
-    higher-scored candidate is yielded first (score is the tiebreak). Duplicate
-    texts (by MD5) are emitted once, keeping the first (highest-position,
-    highest-score) occurrence.
-
-    Order is intentionally *not* re-sorted globally by score: a relevant chunk
-    that the reranker under-scores must stay near the front so a downstream
-    top-k / threshold can't silently re-drop it.
-    """
-    seen: set[str] = set()
-    max_len = max((len(r.texts) for r in results), default=0)
-    for pos in range(max_len):
-        # Every query's candidate at this rank, best score first.
-        row = [
-            (r.distances[pos], r.texts[pos], r.metadatas[pos])
-            for r in results
-            if pos < len(r.texts)
-        ]
-        row.sort(key=lambda x: x[0], reverse=True)
-        for dist, text, meta in row:
-            text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
-            if text_hash in seen:
-                continue
-            seen.add(text_hash)
-            yield text, meta, dist
 
 
 def _build_previews(
@@ -365,49 +291,26 @@ def _build_previews(
     under control across iterations. Each preview carries ``source`` plus
     any structural fields (``page``, ``headers``, ``collection_type``) the
     chunk has — see ``_preview_meta``. Results are interleaved across queries
-    (see :func:`_interleave_dedup`) so the grader sees each query's best hits,
-    matching what :func:`_dedup_results` returns in the final payload.
+    (see :func:`interleave_dedup`) so the grader sees each query's best hits,
+    matching what :func:`dedup_topk` returns in the final payload.
     """
-    preview_texts: list[str] = []
-    preview_metas: list[dict] = []
-    preview_distances: list[float] = []
-
-    for text, meta, dist in _interleave_dedup(all_results):
-        preview_texts.append(text[:max_chars] + "..." if len(text) > max_chars else text)
-        preview_metas.append(_preview_meta(meta))
-        preview_distances.append(dist)
-        if len(preview_texts) >= preview_k:
-            break
-
+    rows = list(islice(interleave_dedup(all_results), preview_k))
     return [
         RetrievalResult(
-            texts=preview_texts,
-            metadatas=preview_metas,
-            distances=preview_distances,
+            texts=[t[:max_chars] + "..." if len(t) > max_chars else t for t, _, _ in rows],
+            metadatas=[_preview_meta(m) for _, m, _ in rows],
+            distances=[d for _, _, d in rows],
         )
     ]
 
 
-def _dedup_results(
-    results: list[RetrievalResult], k: int
-) -> tuple[list[str], list[dict], list[float]]:
-    """Deduplicate and limit results across all retrieval passes.
-
-    Interleaves across queries (see :func:`_interleave_dedup`) so a small ``k``
-    is shared fairly between queries rather than consumed entirely by the first.
-    """
-    texts: list[str] = []
-    metadatas: list[dict] = []
-    distances: list[float] = []
-
-    for text, meta, dist in _interleave_dedup(results):
-        texts.append(text)
-        metadatas.append(meta)
-        distances.append(dist)
-        if len(texts) >= k:
-            break
-
-    return texts, metadatas, distances
+def _respond(results: list[RetrievalResult], k: int, label: str = "") -> SearchResponse:
+    """Final payload: interleaved, deduped top-``k`` as a single result set."""
+    texts, metadatas, distances = dedup_topk(results, k)
+    log.info("Returning %d deduplicated results%s", len(texts), label)
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("Final payload%s: %s", label, _source_score_pairs(metadatas, distances))
+    return SearchResponse(documents=[texts], metadatas=[metadatas], distances=[distances])
 
 
 def _source_score_pairs(metadatas: list[dict], distances: list[float]) -> list[tuple[str, float]]:
@@ -428,28 +331,13 @@ async def _retrieve_raw_queries(
 
     Seeded into ``AgentDeps.full_results`` ahead of the agent loop so the
     unmodified question is always searched and merged (via
-    :func:`_interleave_dedup`) with the agent's own retrievals. This keeps a
+    :func:`interleave_dedup`) with the agent's own retrievals. This keeps a
     relevant chunk reachable even when the agent's reformulations drift toward
     keyword/web-search phrasing that matches boilerplate instead of content.
     Failures are swallowed — this is a recall safety-net, not a hard dependency.
     """
     try:
-        vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(queries)
-        results: list[RetrievalResult] = []
-        for query_text, query_vector, sparse_vec in zip(
-            queries, vectors, sparse_vectors, strict=True
-        ):
-            texts, metadatas, distances = await retrieve_one_query(
-                query_text,
-                query_vector,
-                sparse_vec,
-                collection_names,
-                fetch_k,
-                use_native_hybrid,
-                rerank_k=k,
-            )
-            results.append(RetrievalResult(texts=texts, metadatas=metadatas, distances=distances))
-        return results
+        return await _retrieve_all(queries, collection_names, fetch_k, k)
     except Exception:
         log.exception("Raw-query seed retrieval failed; continuing with agent-only results")
         return []
@@ -479,7 +367,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     k = request.k
     # fetch_k is the agent's internal candidate pool, decoupled from the
     # user-facing k. The wide pool feeds RRF / grading; final response is
-    # still trimmed to k by _dedup_results.
+    # still trimmed to k by dedup_topk.
     fetch_k = settings.agent_fetch_k
 
     agent = _get_agent()
@@ -491,11 +379,11 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Always search the user's original query, independent of how the agent
     # rewrites it; the agent's own retrievals append to this seed and the lot
-    # is merged by _interleave_dedup. Guards recall against query-rewrite drift.
+    # is merged by interleave_dedup. Guards recall against query-rewrite drift.
     if settings.agent_include_raw_query:
         seeded = await _retrieve_raw_queries(queries, deps.collection_names, fetch_k, k)
         if seeded:
-            deps.full_results = (deps.full_results or []) + seeded
+            deps.full_results = seeded
             if log.isEnabledFor(logging.DEBUG):
                 log.debug(
                     "Seeded %d raw-query result set(s) before agent loop: %s",
@@ -544,16 +432,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     except TimeoutError:
         metrics.agent_timeouts_total.inc()
         log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
-        retrieval_results = deps.full_results or []
-        texts, metadatas, distances = _dedup_results(retrieval_results, k)
-        log.info("Returning %d deduplicated results (timeout)", len(texts))
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug("Final payload (timeout): %s", _source_score_pairs(metadatas, distances))
-        return SearchResponse(
-            documents=[texts],
-            metadatas=[metadatas],
-            distances=[distances],
-        )
+        return _respond(deps.full_results or [], k, " (timeout)")
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:
@@ -565,27 +444,10 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         )
         try:
             fallback_queries = _parse_fallback_queries(result.output) or queries
-            vectors, sparse_vectors, use_native_hybrid = await embed_dense_and_sparse(
-                fallback_queries
+            # rerank_k=None — fallback intentionally returns raw vector results.
+            deps.full_results = await _retrieve_all(
+                fallback_queries, request.collection_names, fetch_k, None
             )
-            fallback_results: list[RetrievalResult] = []
-            for query_text, query_vector, sparse_vec in zip(
-                fallback_queries, vectors, sparse_vectors, strict=True
-            ):
-                # rerank_k=None — fallback intentionally returns raw vector results.
-                texts, metadatas, distances = await retrieve_one_query(
-                    query_text,
-                    query_vector,
-                    sparse_vec,
-                    request.collection_names,
-                    fetch_k,
-                    use_native_hybrid,
-                    rerank_k=None,
-                )
-                fallback_results.append(
-                    RetrievalResult(texts=texts, metadatas=metadatas, distances=distances)
-                )
-            deps.full_results = fallback_results
         except Exception:
             log.exception("Agent fallback direct search failed")
             deps.full_results = []
@@ -598,8 +460,8 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         run_usage,
     )
 
-    # Walk the model responses to surface, per step: token usage by role, and
-    # the queries the agent built each retrieve round. ``retrieve_rounds > 1``
+    # Walk the model responses to surface token usage by role per step (the
+    # queries built each round are in ``deps.round_stats``). ``retrieve_rounds > 1``
     # means a corrective retry happened (the agent judged a round off-topic and
     # searched again) — the closest observable signal of the retry decision.
     from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -626,14 +488,6 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
                 u.output_tokens,
                 u.input_tokens + u.output_tokens,
             )
-            for part in tool_calls:
-                if part.tool_name == "retrieve":
-                    round_queries = part.args_as_dict().get("queries", [])
-                    log.debug(
-                        "Agent step %d built queries: %s",
-                        step,
-                        sanitize_for_log(round_queries),
-                    )
 
     metrics.agent_iterations.observe(run_usage.requests)
     if retrieve_rounds > 1:
@@ -642,13 +496,4 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     if deps.round_stats:
         log.debug("Agent round stats: %s", deps.round_stats)
 
-    texts, metadatas, distances = _dedup_results(retrieval_results, k)
-    log.info("Returning %d deduplicated results", len(texts))
-    if log.isEnabledFor(logging.DEBUG):
-        log.debug("Final payload: %s", _source_score_pairs(metadatas, distances))
-
-    return SearchResponse(
-        documents=[texts],
-        metadatas=[metadatas],
-        distances=[distances],
-    )
+    return _respond(retrieval_results, k)

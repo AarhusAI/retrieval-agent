@@ -237,7 +237,7 @@ flowchart TD
     Cnative --> F
     Cbm25 --> F
     F -- yes --> G[Cross-encoder<br/>rerank]
-    F -- no --> H[Dedup by MD5<br/>+ limit k]
+    F -- no --> H[Dedup by text<br/>+ limit k]
     G --> H
     H --> I[Response]
 ```
@@ -250,7 +250,7 @@ flowchart TD
    path branches by collection capability: native server-side RRF when sparse is present, client-side BM25 RRF as a
    fallback when it isn't.
 4. **Reranking** *(optional)* — cross-encoder rescores top `k × INITIAL_RETRIEVAL_MULTIPLIER` candidates down to `k`.
-5. **Dedup** by content hash (MD5), limit to `k` per query. The response shape is one document list per query.
+5. **Dedup** by exact text, limit to `k` per query. The response shape is one document list per query.
 
 ### Agentic Mode (`ENABLE_AGENTIC_RAG=true`)
 

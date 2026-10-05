@@ -1,11 +1,12 @@
-import re
+from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 # Open WebUI collection names look like ``file-<uuid>``, ``user-memory-<uuid>``,
 # or bare knowledge-collection UUIDs — all ASCII alphanumerics + ``_``/``-``.
 # Anything else is either an injection attempt or a misconfigured upstream.
-_COLLECTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+CollectionName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")]
+Query = Annotated[str, Field(max_length=2000)]
 
 
 class ChatMessage(BaseModel):
@@ -14,33 +15,35 @@ class ChatMessage(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    queries: list[str] | None = Field(default=None, max_length=10)
+    queries: list[Query] | None = Field(default=None, max_length=10)
     messages: list[ChatMessage] | None = Field(default=None, max_length=50)
-    collection_names: list[str] = Field(min_length=1, max_length=20)
+    collection_names: list[CollectionName] = Field(min_length=1, max_length=20)
     k: int = Field(default=5, ge=1, le=100)
     retrieval_query_generation_prompt_template: str | None = Field(default=None, max_length=8000)
-
-    @field_validator("queries")
-    @classmethod
-    def validate_query_length(cls, v: list[str] | None) -> list[str] | None:
-        if v is not None:
-            for q in v:
-                if len(q) > 2000:
-                    raise ValueError("Individual query must not exceed 2000 characters")
-        return v
-
-    @field_validator("collection_names")
-    @classmethod
-    def validate_collection_names(cls, v: list[str]) -> list[str]:
-        for name in v:
-            if not _COLLECTION_NAME_RE.fullmatch(name):
-                raise ValueError("collection_names entries must match [A-Za-z0-9_-]{1,128}")
-        return v
 
     @model_validator(mode="after")
     def require_queries_or_messages(self):
         if not self.queries and not self.messages:
             raise ValueError("At least one of 'queries' or 'messages' must be provided")
+        return self
+
+
+class RetrievalResult(BaseModel):
+    """One query's ranked hits as parallel lists."""
+
+    texts: list[str]
+    metadatas: list[dict]
+    distances: list[float]
+
+    @model_validator(mode="after")
+    def require_parallel_lists(self):
+        # interleave_dedup indexes all three lists by position — a mismatch must
+        # fail here, not as an IndexError or silent truncation mid-merge.
+        if not (len(self.texts) == len(self.metadatas) == len(self.distances)):
+            raise ValueError(
+                f"texts ({len(self.texts)}), metadatas ({len(self.metadatas)}) and "
+                f"distances ({len(self.distances)}) must have the same length"
+            )
         return self
 
 
