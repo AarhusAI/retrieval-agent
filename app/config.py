@@ -1,17 +1,10 @@
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
-# Placeholder values that historically shipped in docker-compose defaults.
-# Treat them as misconfiguration and refuse to boot.
-_PLACEHOLDER_API_KEYS = {
-    "",
-    "change_me",
-    "change_me_now",
-    "changeme",
-    "secret",
-    "password",
-}
+# Long enough that the placeholders that historically shipped in
+# docker-compose defaults ("change_me", "secret", ...) are all rejected.
 _MIN_API_KEY_LENGTH = 32
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 class Settings(BaseSettings):
@@ -23,10 +16,7 @@ class Settings(BaseSettings):
     @field_validator("api_key")
     @classmethod
     def _reject_weak_api_key(cls, v: str) -> str:
-        normalised = v.strip()
-        if normalised.lower() in _PLACEHOLDER_API_KEYS:
-            raise ValueError("API_KEY is unset or a known placeholder; set a strong value in .env")
-        if len(normalised) < _MIN_API_KEY_LENGTH:
+        if len(v.strip()) < _MIN_API_KEY_LENGTH:
             raise ValueError(f"API_KEY must be at least {_MIN_API_KEY_LENGTH} characters")
         return v
 
@@ -117,15 +107,6 @@ class Settings(BaseSettings):
     log_format: str = "text"
     metrics_enabled: bool = True
 
-    @field_validator("log_level")
-    @classmethod
-    def _validate_log_level(cls, v: str) -> str:
-        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        upper = v.upper()
-        if upper not in allowed:
-            raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}; got {v!r}")
-        return upper
-
     @field_validator("log_format")
     @classmethod
     def _validate_log_format(cls, v: str) -> str:
@@ -139,16 +120,17 @@ class Settings(BaseSettings):
     # third-party DEBUG flood (httpcore/httpx/openai). Empty = inherit the root.
     log_level_app: str = ""
 
-    @field_validator("log_level_app")
+    @field_validator("log_level", "log_level_app")
     @classmethod
-    def _validate_log_level_app(cls, v: str) -> str:
-        if not v:
+    def _validate_log_level(cls, v: str, info) -> str:
+        # Empty is only meaningful for LOG_LEVEL_APP (= inherit the root level).
+        if not v and info.field_name == "log_level_app":
             return ""
-        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        upper = v.upper()
-        if upper not in allowed:
-            raise ValueError(f"LOG_LEVEL_APP must be one of {sorted(allowed)} or empty; got {v!r}")
-        return upper
+        if v.upper() not in _LOG_LEVELS:
+            raise ValueError(
+                f"{info.field_name.upper()} must be one of {sorted(_LOG_LEVELS)}; got {v!r}"
+            )
+        return v.upper()
 
     # Server
     host: str = "0.0.0.0"  # nosec B104  # containerized service; binding to all interfaces is intentional

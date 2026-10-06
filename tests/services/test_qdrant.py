@@ -6,7 +6,8 @@ import pytest
 from qdrant_client import models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from app.services.qdrant import QdrantResult, vector_search
+from app.models import RetrievalResult
+from app.services.qdrant import vector_search
 
 
 def _make_point(id, content, meta, score):
@@ -32,7 +33,7 @@ async def test_vector_search_basic():
     ):
         result = await vector_search(["file-abc"], [0.1, 0.2], None, k=5)
 
-    assert isinstance(result, QdrantResult)
+    assert isinstance(result, RetrievalResult)
     assert result.texts == ["hello world", "foo bar"]
     assert result.metadatas == [
         {"source": "a", "collection_name": "file-abc"},

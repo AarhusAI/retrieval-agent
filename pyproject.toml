@@ -27,6 +27,7 @@ dev = [
     "pytest-cov>=7.0",
     "pip-audit>=2.7",
     "bandit>=1.9",
+    "basedpyright>=1.31",
 ]
 
 [build-system]
@@ -44,6 +45,11 @@ ignore = ["B008"]  # Allow Depends() in function defaults (FastAPI pattern)
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+[tool.basedpyright]
+include = ["app", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

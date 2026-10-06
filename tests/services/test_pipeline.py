@@ -1,8 +1,7 @@
 from unittest.mock import AsyncMock, patch
 
-from app.models import ChatMessage, SearchRequest, SearchResponse
+from app.models import ChatMessage, RetrievalResult, SearchRequest, SearchResponse
 from app.services.pipeline import extract_queries_from_messages, linear_search, search
-from app.services.qdrant import QdrantResult
 
 EMBED_PATH = "app.services.pipeline.embedding.embed_queries"
 VSEARCH_PATH = "app.services.pipeline.qdrant.vector_search"
@@ -25,7 +24,7 @@ def _patch_has_sparse(return_value=False):
 
 async def test_basic_search_flow():
     request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=2)
-    mock_qdrant_result = QdrantResult(
+    mock_qdrant_result = RetrievalResult(
         texts=["doc1", "doc2"],
         metadatas=[{"src": "a"}, {"src": "b"}],
         distances=[0.9, 0.8],
@@ -42,7 +41,7 @@ async def test_basic_search_flow():
 async def test_vector_search_called_with_collection_names_list():
     """Pipeline passes the full collection_names list as a single arg — no per-collection gather."""  # noqa: E501
     request = SearchRequest(queries=["hello"], collection_names=["c1", "c2"], k=2)
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with (
         _patch_embed([[0.1]]),
@@ -63,7 +62,7 @@ async def test_vector_search_called_with_collection_names_list():
 async def test_deduplication():
     """Identical chunks deduped on the way out."""
     request = SearchRequest(queries=["hello"], collection_names=["c1"], k=5)
-    mock_result = QdrantResult(
+    mock_result = RetrievalResult(
         texts=["same text", "same text", "other"],
         metadatas=[{"src": "a"}, {"src": "b"}, {"src": "c"}],
         distances=[0.9, 0.85, 0.8],
@@ -78,7 +77,7 @@ async def test_deduplication():
 
 async def test_k_limits_results():
     request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=1)
-    mock_result = QdrantResult(
+    mock_result = RetrievalResult(
         texts=["doc1", "doc2", "doc3"],
         metadatas=[{}, {}, {}],
         distances=[0.9, 0.8, 0.7],
@@ -92,7 +91,7 @@ async def test_k_limits_results():
 
 async def test_multiple_queries():
     request = SearchRequest(queries=["q1", "q2"], collection_names=["coll1"], k=2)
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with _patch_embed([[0.1], [0.2]]), _patch_vsearch(mock_result), _patch_has_sparse():
         result = await linear_search(request)
@@ -105,7 +104,7 @@ async def test_reranking_enabled(monkeypatch):
     monkeypatch.setattr("app.services.pipeline.settings.initial_retrieval_multiplier", 3)
 
     request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=2)
-    mock_result = QdrantResult(
+    mock_result = RetrievalResult(
         texts=["doc1", "doc2"],
         metadatas=[{"a": 1}, {"b": 2}],
         distances=[0.9, 0.8],
@@ -142,7 +141,7 @@ async def test_search_with_messages_extracts_query_when_generation_disabled(monk
         collection_names=["coll1"],
         k=2,
     )
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{"src": "a"}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{"src": "a"}], distances=[0.9])
 
     with (
         _patch_embed([[0.1, 0.2]]) as mock_embed,
@@ -164,7 +163,7 @@ async def test_search_with_messages_uses_query_generation(monkeypatch):
         collection_names=["coll1"],
         k=2,
     )
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with (
         _patch_embed([[0.1]]) as mock_embed,
@@ -190,7 +189,7 @@ async def test_search_falls_back_to_queries_when_generation_fails(monkeypatch):
         collection_names=["coll1"],
         k=2,
     )
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with (
         _patch_embed([[0.1]]) as mock_embed,
@@ -215,7 +214,7 @@ async def test_search_with_queries_only_no_generation(monkeypatch):
         collection_names=["coll1"],
         k=2,
     )
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with (
         _patch_embed([[0.1]]) as mock_embed,
@@ -257,7 +256,7 @@ async def test_search_routes_to_linear_when_agentic_disabled(monkeypatch):
     monkeypatch.setattr("app.services.pipeline.settings.enable_agentic_rag", False)
 
     request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=2)
-    mock_result = QdrantResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
+    mock_result = RetrievalResult(texts=["doc1"], metadatas=[{}], distances=[0.9])
 
     with _patch_embed([[0.1]]), _patch_vsearch(mock_result), _patch_has_sparse():
         result = await search(request)
@@ -271,7 +270,9 @@ async def test_bm25_fallback_runs_when_hybrid_on_and_no_sparse(monkeypatch):
     monkeypatch.setattr("app.services.pipeline.settings.enable_hybrid_search", True)
 
     request = SearchRequest(queries=["hello"], collection_names=["c1", "c2"], k=5)
-    mock_result = QdrantResult(texts=["same text"], metadatas=[{"src": "first"}], distances=[0.9])
+    mock_result = RetrievalResult(
+        texts=["same text"], metadatas=[{"src": "first"}], distances=[0.9]
+    )
 
     bm25_call = AsyncMock(return_value=[("same text", 5.0, {"src": "bm25"})])
     sparse_call = AsyncMock(return_value=[None])
@@ -298,7 +299,9 @@ async def test_bm25_only_documents_keep_their_metadata(monkeypatch):
     monkeypatch.setattr("app.services.pipeline.settings.enable_hybrid_search", True)
 
     request = SearchRequest(queries=["hello"], collection_names=["c1"], k=5)
-    mock_result = QdrantResult(texts=["vector doc"], metadatas=[{"src": "vec"}], distances=[0.9])
+    mock_result = RetrievalResult(
+        texts=["vector doc"], metadatas=[{"src": "vec"}], distances=[0.9]
+    )
 
     bm25_call = AsyncMock(return_value=[("keyword-only doc", 5.0, {"src": "scrolled.pdf"})])
 
@@ -321,7 +324,7 @@ async def test_native_hybrid_skips_client_bm25(monkeypatch):
     monkeypatch.setattr("app.services.pipeline.settings.enable_hybrid_search", True)
 
     request = SearchRequest(queries=["hello"], collection_names=["c1"], k=2)
-    mock_result = QdrantResult(texts=["doc"], metadatas=[{}], distances=[0.5])
+    mock_result = RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.5])
 
     bm25_call = AsyncMock(return_value=[])
     sparse_call = AsyncMock(return_value=[None])  # sparse_query_provider=none case

@@ -1,17 +1,20 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from pydantic import ValidationError
+
 from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
     AgentDeps,
     RetrievalResult,
     _build_previews,
-    _dedup_results,
     _parse_fallback_queries,
     _run_retrieve,
     agentic_search,
     extract_queries_from_messages,
 )
+from app.services.pipeline import dedup_topk
 
 
 def _mock_usage(input_tokens=100, output_tokens=50, requests=2, tool_calls=1):
@@ -28,7 +31,7 @@ def _make_mock_agent(full_results: list[RetrievalResult]):
     """Create a mock agent whose run() populates deps.full_results."""
     mock_agent_result = MagicMock()
     mock_agent_result.output = "done"
-    mock_agent_result.usage.return_value = _mock_usage()
+    mock_agent_result.usage = _mock_usage()
 
     async def _run(prompt, *, deps: AgentDeps, **kwargs):
         deps.full_results = full_results
@@ -69,7 +72,7 @@ class TestDedupResults:
             RetrievalResult(texts=["a", "b"], metadatas=[{}, {}], distances=[0.9, 0.8]),
             RetrievalResult(texts=["a", "c"], metadatas=[{}, {}], distances=[0.95, 0.7]),
         ]
-        texts, _metas, _dists = _dedup_results(results, k=10)
+        texts, _metas, _dists = dedup_topk(results, k=10)
         assert texts == ["a", "b", "c"]
 
     def test_respects_k_limit(self):
@@ -78,11 +81,18 @@ class TestDedupResults:
                 texts=["a", "b", "c"], metadatas=[{}, {}, {}], distances=[0.9, 0.8, 0.7]
             ),
         ]
-        texts, _, _ = _dedup_results(results, k=2)
+        texts, _, _ = dedup_topk(results, k=2)
         assert len(texts) == 2
 
+    def test_rejects_mismatched_parallel_lists(self):
+        """Mismatched lengths would crash or silently drop data in interleave_dedup."""
+        with pytest.raises(ValidationError):
+            RetrievalResult(texts=["a", "b"], metadatas=[{}], distances=[0.9, 0.8])
+        with pytest.raises(ValidationError):
+            RetrievalResult(texts=["a"], metadatas=[{}, {}], distances=[0.9, 0.8])
+
     def test_empty_results(self):
-        texts, metas, dists = _dedup_results([], k=5)
+        texts, metas, dists = dedup_topk([], k=5)
         assert texts == []
         assert metas == []
         assert dists == []
@@ -109,7 +119,7 @@ class TestDedupResults:
                 distances=[0.13, 0.09, 0.09],
             ),
         ]
-        texts, _metas, dists = _dedup_results(results, k=3)
+        texts, _metas, dists = dedup_topk(results, k=3)
         assert "answer" in texts
         assert texts == ["toc1", "answer", "toc2"]
         assert dists == [0.80, 0.13, 0.76]
@@ -195,7 +205,7 @@ class TestAgenticSearch:
             deps.full_results = (deps.full_results or []) + [drift]
             result = MagicMock()
             result.output = "done"
-            result.usage.return_value = _mock_usage()
+            result.usage = _mock_usage()
             result.all_messages.return_value = []
             return result
 
@@ -278,7 +288,7 @@ class TestAgenticSearch:
         """When agent doesn't call retrieve and embed_queries fails, returns empty results."""
         mock_agent_result = MagicMock()
         mock_agent_result.output = "I could not process that"
-        mock_agent_result.usage.return_value = _mock_usage()
+        mock_agent_result.usage = _mock_usage()
         mock_agent_result.all_messages.return_value = []
 
         mock_agent = AsyncMock()
@@ -317,7 +327,7 @@ class TestAgenticSearch:
             call_count += 1
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage()
+            mock_result.usage = _mock_usage()
             mock_result.all_messages.return_value = []
             return mock_result
 
@@ -360,7 +370,7 @@ class TestAgentRetryObservability:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage(requests=3)
+            mock_result.usage = _mock_usage(requests=3)
             mock_result.all_messages.return_value = messages
             return mock_result
 
@@ -392,7 +402,7 @@ class TestAgentRetryObservability:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage(requests=2)
+            mock_result.usage = _mock_usage(requests=2)
             mock_result.all_messages.return_value = messages
             return mock_result
 
@@ -550,7 +560,7 @@ class TestAgentRecallDecoupling:
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
-            mock_result.usage.return_value = _mock_usage()
+            mock_result.usage = _mock_usage()
             mock_result.all_messages.return_value = []
             return mock_result
 
@@ -596,6 +606,11 @@ class TestParseFallbackQueries:
         output = '[TOOL_CALLS]retrieve{"queries": ["test query"]} some trailing text'
         result = _parse_fallback_queries(output)
         assert result == ["test query"]
+
+    def test_mistral_tool_calls_with_braces_in_prose(self):
+        """Braces in prose before [TOOL_CALLS] must not hijack the JSON slice."""
+        output = 'I used {braces}. [TOOL_CALLS]retrieve{"queries": ["q1"]}'
+        assert _parse_fallback_queries(output) == ["q1"]
 
     def test_plain_json(self):
         output = '{"queries": ["q1", "q2"]}'
