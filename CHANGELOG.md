@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-10-06
+
 ### Added
 
 - GitHub Actions workflows and lint tasks (markdown, YAML).
