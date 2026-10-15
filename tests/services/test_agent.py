@@ -342,6 +342,32 @@ class TestAgenticSearch:
         assert "doc2" in result.documents[0]
 
 
+class TestAgentMaxIterations:
+    async def test_limit_enforced_and_partial_results_returned(self):
+        """AGENT_MAX_ITERATIONS is a hard request limit, not just prompt text."""
+        from pydantic_ai.exceptions import UsageLimitExceeded
+
+        seen_limits = []
+
+        async def _run(prompt, *, deps: AgentDeps, usage_limits, **kwargs):
+            seen_limits.append(usage_limits.request_limit)
+            deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+            raise UsageLimitExceeded("request_limit exceeded")
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch.object(settings, "agent_max_iterations", 2),
+        ):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            result = await agentic_search(request)
+
+        assert seen_limits == [3]
+        assert result.documents == [["doc"]]
+
+
 class TestAgentRetryObservability:
     async def test_two_retrieve_rounds_count_as_retry(self):
         """retrieve → evaluate → retrieve in the message history means the agent

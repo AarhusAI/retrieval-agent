@@ -32,7 +32,7 @@ _model: SparseTextEmbedding | None = None
 
 def get_model() -> SparseTextEmbedding | None:
     """Lazy-load the fastembed sparse model. ``None`` when the provider is disabled."""
-    if settings.sparse_query_provider.lower() == "none":
+    if settings.sparse_query_provider == "none":
         return None
 
     global _model

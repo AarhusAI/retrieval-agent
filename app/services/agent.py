@@ -14,9 +14,11 @@ from itertools import islice
 
 import httpx
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
 
 from app import metrics
 from app.config import settings
@@ -426,13 +428,25 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     try:
         async with metrics.time_stage("agent_loop"):
             result = await asyncio.wait_for(
-                agent.run(user_prompt, deps=deps, model_settings={"temperature": 0}),
+                agent.run(
+                    user_prompt,
+                    deps=deps,
+                    model_settings={"temperature": 0},
+                    # One LLM request per retrieve round, plus the final answer.
+                    usage_limits=UsageLimits(request_limit=settings.agent_max_iterations + 1),
+                ),
                 timeout=settings.agent_timeout,
             )
     except TimeoutError:
         metrics.agent_timeouts_total.inc()
         log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
         return _respond(deps.full_results or [], k, " (timeout)")
+    except UsageLimitExceeded:
+        log.warning(
+            "Agent hit AGENT_MAX_ITERATIONS=%d, returning partial results",
+            settings.agent_max_iterations,
+        )
+        return _respond(deps.full_results or [], k, " (max iterations)")
 
     # Fallback: if agent didn't call retrieve, do direct search
     if deps.full_results is None:

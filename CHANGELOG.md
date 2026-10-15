@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ## [Unreleased]
 
+### Fixed
+
+- `AGENT_MAX_ITERATIONS` is now enforced as a PydanticAI request limit (iterations + 1) instead of only being stated in
+  the system prompt; hitting it returns the partial results gathered so far.
+- `BM25_MAX_DOCS`, `RERANK_FUSION`, `RERANK_RRF_K` and `AGENT_INCLUDE_RAW_QUERY` are passed through `docker-compose.yml`
+  (previously only picked up via the mounted `.env` in dev).
+
+### Changed
+
+- `RERANK_FUSION` (`rrf`|`replace`) and `SPARSE_QUERY_PROVIDER` (`fastembed`|`none`) are validated at startup; a typo
+  no longer silently selects the other branch. `SPARSE_QUERY_PROVIDER` is now case-sensitive.
+- Removed `HOST`/`PORT` settings and the unused `python -m app.main` runner; the bind address is set by the uvicorn
+  command in the Dockerfile/compose.
+- README configuration table lists all settings; CLAUDE.md references `LOG_LEVEL_APP` instead of the removed `DEBUG`.
+
 ## [0.0.4] - 2026-10-06
 
 ### Added
