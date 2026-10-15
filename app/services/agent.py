@@ -6,15 +6,15 @@ retrieval, and corrective relevance grading with retry.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from itertools import islice
 
 import httpx
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -31,6 +31,7 @@ from app.services.pipeline import (
     interleave_dedup,
     retrieve_one_query,
 )
+from app.services.query_generation import parse_queries as _parse_fallback_queries
 
 log = logging.getLogger(__name__)
 
@@ -49,10 +50,6 @@ class AgentDeps:
     fetch_k: int
     # Side-channel: full results stored here, truncated previews sent to LLM
     full_results: list[RetrievalResult] | None = None
-    # Per-retrieve-round insight (queries built + per-query hit counts + top
-    # scores), appended once per ``retrieve`` tool call. Drives the DEBUG
-    # round-trace and makes the agent's retry behaviour observable.
-    round_stats: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -189,16 +186,6 @@ async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalRe
 
     all_results = await _retrieve_all(queries, deps.collection_names, deps.fetch_k, deps.k)
 
-    # Record this round's queries, per-query hit counts and top scores so
-    # the agent's search/retry behaviour is observable after the run.
-    deps.round_stats.append(
-        {
-            "queries": list(queries),
-            "hit_counts": [len(r.texts) for r in all_results],
-            "top_scores": [[round(d, 4) for d in r.distances[:3]] for r in all_results],
-        }
-    )
-
     # Accumulate full results across retries (dedup happens downstream)
     deps.full_results = (deps.full_results or []) + all_results
 
@@ -231,24 +218,6 @@ async def close_client() -> None:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-
-def _parse_fallback_queries(output: str) -> list[str] | None:
-    """Try to extract queries from agent text output (when it skips tool calling).
-
-    Takes the outermost ``{...}`` after the last ``[TOOL_CALLS]`` marker (or in
-    the whole output when absent), which covers both plain JSON
-    (``{"queries": [...]}``) and Mistral tool-call text
-    (``[TOOL_CALLS]retrieve{"queries": [...]}``) even with braces in prose before it.
-    """
-    output = output.split("[TOOL_CALLS]")[-1]
-    try:
-        data = json.loads(output[output.index("{") : output.rindex("}") + 1])
-    except (ValueError, TypeError):  # no braces, or invalid JSON
-        return None
-    if not isinstance(data, dict) or not isinstance(data.get("queries"), list):
-        return None
-    return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
 
 
 _PREVIEW_META_FIELDS: tuple[str, ...] = (
@@ -323,28 +292,6 @@ def _source_score_pairs(metadatas: list[dict], distances: list[float]) -> list[t
     ]
 
 
-async def _retrieve_raw_queries(
-    queries: list[str],
-    collection_names: list[str],
-    fetch_k: int,
-    k: int,
-) -> list[RetrievalResult]:
-    """Retrieve the user's *original* queries, before the agent rewrites them.
-
-    Seeded into ``AgentDeps.full_results`` ahead of the agent loop so the
-    unmodified question is always searched and merged (via
-    :func:`interleave_dedup`) with the agent's own retrievals. This keeps a
-    relevant chunk reachable even when the agent's reformulations drift toward
-    keyword/web-search phrasing that matches boilerplate instead of content.
-    Failures are swallowed — this is a recall safety-net, not a hard dependency.
-    """
-    try:
-        return await _retrieve_all(queries, collection_names, fetch_k, k)
-    except Exception:
-        log.exception("Raw-query seed retrieval failed; continuing with agent-only results")
-        return []
-
-
 async def agentic_search(request: SearchRequest) -> SearchResponse:
     """Run the PydanticAI agent loop for agentic retrieval.
 
@@ -381,9 +328,15 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
 
     # Always search the user's original query, independent of how the agent
     # rewrites it; the agent's own retrievals append to this seed and the lot
-    # is merged by interleave_dedup. Guards recall against query-rewrite drift.
+    # is merged by interleave_dedup. Guards recall against query-rewrite drift
+    # (e.g. reformulations that match boilerplate instead of content). Failures
+    # are swallowed — this is a recall safety-net, not a hard dependency.
     if settings.agent_include_raw_query:
-        seeded = await _retrieve_raw_queries(queries, deps.collection_names, fetch_k, k)
+        try:
+            seeded = await _retrieve_all(queries, deps.collection_names, fetch_k, k)
+        except Exception:
+            log.exception("Raw-query seed retrieval failed; continuing with agent-only results")
+            seeded = []
         if seeded:
             deps.full_results = seeded
             if log.isEnabledFor(logging.DEBUG):
@@ -470,16 +423,14 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     run_usage = result.usage
     log.info(
         "Agentic search complete: %d result sets, usage=%s",
-        len(retrieval_results) if retrieval_results else 0,
+        len(retrieval_results),
         run_usage,
     )
 
-    # Walk the model responses to surface token usage by role per step (the
-    # queries built each round are in ``deps.round_stats``). ``retrieve_rounds > 1``
-    # means a corrective retry happened (the agent judged a round off-topic and
-    # searched again) — the closest observable signal of the retry decision.
-    from pydantic_ai.messages import ModelResponse, ToolCallPart
-
+    # Walk the model responses to surface token usage by role per step.
+    # ``retrieve_rounds > 1`` means a corrective retry happened (the agent
+    # judged a round off-topic and searched again) — the closest observable
+    # signal of the retry decision.
     step = 0
     retrieve_rounds = 0
     for msg in result.all_messages():
@@ -507,7 +458,5 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     if retrieve_rounds > 1:
         metrics.agent_retries_total.inc()
         log.info("Agent performed %d retrieve rounds (retry occurred)", retrieve_rounds)
-    if deps.round_stats:
-        log.debug("Agent round stats: %s", deps.round_stats)
 
     return _respond(retrieval_results, k)

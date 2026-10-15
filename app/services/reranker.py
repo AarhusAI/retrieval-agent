@@ -59,6 +59,7 @@ async def rerank(
         return documents[:k], metadatas[:k], [0.0] * min(len(documents), k)
 
     n = len(documents)
+    rerank_order = sorted(range(n), key=lambda i: scores[i], reverse=True)
 
     if settings.rerank_fusion == "rrf":
         # Reciprocal Rank Fusion: input index = retrieval rank, cross-encoder
@@ -66,7 +67,6 @@ async def rerank(
         # burying a strong dense/hybrid hit it happens to underrank. Stable sort
         # ⇒ retrieval order breaks fused-score ties.
         rf = settings.rerank_rrf_k
-        rerank_order = sorted(range(n), key=lambda i: scores[i], reverse=True)
         rerank_rank = {idx: pos for pos, idx in enumerate(rerank_order)}
         order = sorted(
             range(n),
@@ -74,7 +74,7 @@ async def rerank(
             reverse=True,
         )[:k]
     else:  # "replace" — cross-encoder score only (older behaviour)
-        order = sorted(range(n), key=lambda i: scores[i], reverse=True)[:k]
+        order = rerank_order[:k]
 
     # Return the cross-encoder relevance score (meaning unchanged downstream);
     # only the ordering reflects the fusion.

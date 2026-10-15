@@ -71,10 +71,11 @@ def configure_logging(settings: Settings) -> None:
       so even ``LOG_LEVEL=DEBUG`` doesn't drown in httpcore/openai wire chatter.
     - ``LOG_FORMAT`` picks the text (human) or json (aggregator) formatter.
     """
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    # Settings already validated/normalised the name, so no default is needed.
+    level = getattr(logging, settings.log_level)
 
     handler = logging.StreamHandler()
-    if settings.log_format.lower() == "json":
+    if settings.log_format == "json":
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter(_TEXT_FORMAT))

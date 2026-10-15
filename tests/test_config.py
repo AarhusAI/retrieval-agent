@@ -21,10 +21,6 @@ def test_log_level_rejects_unknown():
         _settings(log_level="verbose")
 
 
-def test_log_format_normalises_case():
-    assert _settings(log_format="JSON").log_format == "json"
-
-
 def test_log_format_rejects_unknown():
     with pytest.raises(ValidationError):
         _settings(log_format="yaml")

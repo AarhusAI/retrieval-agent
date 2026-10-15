@@ -106,16 +106,8 @@ class Settings(BaseSettings):
     # (one object per line, for Loki / a structured-log pipeline). METRICS_ENABLED
     # gates only the GET /metrics endpoint — instrumentation always runs.
     log_level: str = "INFO"
-    log_format: str = "text"
+    log_format: Literal["text", "json"] = "text"
     metrics_enabled: bool = True
-
-    @field_validator("log_format")
-    @classmethod
-    def _validate_log_format(cls, v: str) -> str:
-        lower = v.lower()
-        if lower not in {"text", "json"}:
-            raise ValueError(f"LOG_FORMAT must be 'text' or 'json'; got {v!r}")
-        return lower
 
     # Per-namespace override for the service's own loggers ('app.*'), applied on
     # top of LOG_LEVEL. Set to DEBUG to see verbose app logs without the

@@ -17,58 +17,45 @@ from app.services import qdrant, query_generation, sparse_embedding
 configure_logging(settings)
 log = logging.getLogger(__name__)
 
+# Settings safe to print at startup. Never add *_key or prompt fields here.
+_LOGGED_SETTINGS = {
+    "log_level",
+    "log_level_app",
+    "log_format",
+    "metrics_enabled",
+    "qdrant_uri",
+    "qdrant_index",
+    "embedding_model",
+    "embedding_prefix_query",
+    "enable_hybrid_search",
+    "sparse_query_provider",
+    "sparse_query_model",
+    "enable_reranking",
+    "enable_agentic_rag",
+    "agent_model",
+    "agent_api_base_url",
+    "agent_max_iterations",
+}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("Starting agentic retrieval service")
-    log.info(
-        "Observability: log_level=%s log_level_app=%s log_format=%s metrics_enabled=%s",
-        settings.log_level,
-        settings.log_level_app or "(inherit)",
-        settings.log_format,
-        settings.metrics_enabled,
-    )
-    log.info("Qdrant: uri=%s index=%s", settings.qdrant_uri, settings.qdrant_index)
-    log.info(
-        "Embedding: model=%s query_prefix=%r",
-        settings.embedding_model,
-        settings.embedding_prefix_query,
-    )
-    log.info(
-        "Hybrid search: enable=%s sparse_provider=%s sparse_model=%s",
-        settings.enable_hybrid_search,
-        settings.sparse_query_provider,
-        settings.sparse_query_model,
-    )
-    log.info("Reranking: %s", settings.enable_reranking)
-    log.info("Agentic RAG: %s", settings.enable_agentic_rag)
-    if settings.enable_agentic_rag:
-        log.info("Agent model: %s", settings.agent_model)
-        log.info("Agent API base: %s", settings.agent_api_base_url)
-        log.info("Agent max iterations: %d", settings.agent_max_iterations)
+    # Allowlist (not an exclude list) so a new credential field can never leak
+    # into the startup log by omission.
+    log.info("Config: %s", settings.model_dump(include=_LOGGED_SETTINGS))
 
     # Eagerly initialize Qdrant client
     qdrant.get_client()
 
     # Detect sparse-vector capability on the configured collection. Cached
     # for the process lifetime once a definite answer is obtained; if the
-    # collection doesn't yet exist (cold-start before any ingest), we
-    # re-detect on first query.
-    if qdrant.collection_exists():
-        sparse_present = qdrant.has_sparse_vectors()
-        log.info(
-            "Sparse vectors on collection %r: %s",
-            settings.qdrant_index,
-            sparse_present,
-        )
-        if settings.enable_hybrid_search and sparse_present:
-            sparse_embedding.get_model()
-    else:
-        log.warning(
-            "Qdrant collection %r does not exist yet; sparse capability "
-            "will be detected on first query.",
-            settings.qdrant_index,
-        )
+    # collection doesn't yet exist (cold-start before any ingest), this is
+    # False (uncached) and we re-detect on first query.
+    sparse_present = qdrant.has_sparse_vectors()
+    log.info("Sparse vectors on collection %r: %s", settings.qdrant_index, sparse_present)
+    if settings.enable_hybrid_search and sparse_present:
+        sparse_embedding.get_model()
 
     yield
 
@@ -80,7 +67,6 @@ async def lifespan(app: FastAPI):
     agent_module = sys.modules.get("app.services.agent")
     if agent_module is not None:
         await agent_module.close_client()
-    sparse_embedding.close()
     qdrant.close_client()
     log.info("Agentic retrieval service shut down")
 
@@ -100,8 +86,8 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/metrics")
-async def metrics(_api_key: str = Depends(verify_api_key)):
+@app.get("/metrics", dependencies=[Depends(verify_api_key)])
+async def metrics():
     """Prometheus scrape endpoint.
 
     Bearer-authenticated with the same ``API_KEY`` as ``/search`` — the scrape

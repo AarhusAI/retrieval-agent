@@ -334,8 +334,8 @@ without amplifying the root logger.
   Qdrant call summary, BM25 index builds, reranker fail-open warnings, and — for the agent — an
   `Agent performed N retrieve rounds (retry occurred)` line when a corrective retry happened.
 - **DEBUG** — adds the resolved/generated queries, each retrieve round's built queries (recovered from the
-  agent's tool calls), per-query candidate counts and top scores, per-step agent token usage (searching vs
-  grading), and the per-round `round_stats` (queries + hit counts + top scores). This is how you debug
+  agent's tool calls), per-query candidate counts and top scores, and per-step agent token usage (searching vs
+  grading). This is how you debug
   **how the agent built its queries** and **what triggered a retry**. It also emits the **full LLM request
   payload** (model + messages + tools + temperature, long fields truncated) under the `app.llm` logger, for
   both the agent loop and linear query generation — so you can see exactly what was sent to the model.

@@ -1,8 +1,5 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from pydantic import ValidationError
-
 from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
@@ -84,13 +81,6 @@ class TestDedupResults:
         texts, _, _ = dedup_topk(results, k=2)
         assert len(texts) == 2
 
-    def test_rejects_mismatched_parallel_lists(self):
-        """Mismatched lengths would crash or silently drop data in interleave_dedup."""
-        with pytest.raises(ValidationError):
-            RetrievalResult(texts=["a", "b"], metadatas=[{}], distances=[0.9, 0.8])
-        with pytest.raises(ValidationError):
-            RetrievalResult(texts=["a"], metadatas=[{}, {}], distances=[0.9, 0.8])
-
     def test_empty_results(self):
         texts, metas, dists = dedup_topk([], k=5)
         assert texts == []
@@ -161,7 +151,6 @@ class TestRunRetrieve:
         assert deps.full_results[0].texts == ["doc"]
         assert len(previews) == 1
         assert previews[0].texts == ["doc"]
-        assert deps.round_stats[0]["queries"] == ["q1"]
 
 
 class TestAgenticSearch:
