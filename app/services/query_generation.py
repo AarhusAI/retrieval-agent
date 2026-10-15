@@ -83,6 +83,24 @@ $chat_history
 """
 
 
+def parse_queries(output: str) -> list[str] | None:
+    """Extract ``{"queries": [...]}`` from LLM text output.
+
+    Takes the outermost ``{...}`` after the last ``[TOOL_CALLS]`` marker (or in
+    the whole output when absent), which covers both plain JSON and Mistral
+    tool-call text (``[TOOL_CALLS]retrieve{"queries": [...]}``) even with braces
+    in prose before it. Returns ``None`` when no usable object is found.
+    """
+    output = output.split("[TOOL_CALLS]")[-1]
+    try:
+        data = json.loads(output[output.index("{") : output.rindex("}") + 1])
+    except (ValueError, TypeError):  # no braces, or invalid JSON
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("queries"), list):
+        return None
+    return [q for q in data["queries"] if isinstance(q, str) and q.strip()]
+
+
 def _get_template(override: str | None = None) -> str:
     """Return the template to use, checking: request override > env var > default."""
     if override and override.strip():
@@ -152,22 +170,12 @@ async def generate_queries_from_messages(
                 response.usage.total_tokens or 0,
             )
 
-        # Parse JSON — tolerant of extra text around the JSON object
-        bracket_start = content.find("{")
-        bracket_end = content.rfind("}") + 1
-        if bracket_start == -1 or bracket_end <= 0:
-            log.warning("No JSON object in query generation response")
+        queries = parse_queries(content)
+        if queries is None:
+            log.warning("No usable JSON object in query generation response")
             log.debug("Query generation response payload: %s", sanitize_for_log(content))
             return []
 
-        parsed = json.loads(content[bracket_start:bracket_end])
-        queries = parsed.get("queries", [])
-
-        if not isinstance(queries, list):
-            log.warning("Unexpected queries type: %s", type(queries))
-            return []
-
-        queries = [q for q in queries if isinstance(q, str) and q.strip()]
         log.info("Generated %d queries from messages", len(queries))
         log.debug("Generated queries: %s", sanitize_for_log(queries))
         return queries

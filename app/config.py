@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
@@ -58,7 +60,7 @@ class Settings(BaseSettings):
     # Sparse query embedder (used when hybrid is enabled and the configured
     # Qdrant collection has a sparse named vector). Must match the model the
     # ingestion service used for sparse indexing.
-    sparse_query_provider: str = "fastembed"  # fastembed | none
+    sparse_query_provider: Literal["fastembed", "none"] = "fastembed"
     sparse_query_model: str = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 
     # Reranking (OpenAI-compatible API)
@@ -70,7 +72,7 @@ class Settings(BaseSettings):
     # ranking. "rrf" = Reciprocal Rank Fusion — keeps a strong dense hit that the
     # cross-encoder underranks; "replace" = cross-encoder score only (the older
     # behaviour, where the reranker can bury a top dense hit).
-    rerank_fusion: str = "rrf"
+    rerank_fusion: Literal["rrf", "replace"] = "rrf"
     rerank_rrf_k: int = 60
     initial_retrieval_multiplier: int = 3
 
@@ -104,16 +106,8 @@ class Settings(BaseSettings):
     # (one object per line, for Loki / a structured-log pipeline). METRICS_ENABLED
     # gates only the GET /metrics endpoint — instrumentation always runs.
     log_level: str = "INFO"
-    log_format: str = "text"
+    log_format: Literal["text", "json"] = "text"
     metrics_enabled: bool = True
-
-    @field_validator("log_format")
-    @classmethod
-    def _validate_log_format(cls, v: str) -> str:
-        lower = v.lower()
-        if lower not in {"text", "json"}:
-            raise ValueError(f"LOG_FORMAT must be 'text' or 'json'; got {v!r}")
-        return lower
 
     # Per-namespace override for the service's own loggers ('app.*'), applied on
     # top of LOG_LEVEL. Set to DEBUG to see verbose app logs without the
@@ -131,10 +125,6 @@ class Settings(BaseSettings):
                 f"{info.field_name.upper()} must be one of {sorted(_LOG_LEVELS)}; got {v!r}"
             )
         return v.upper()
-
-    # Server
-    host: str = "0.0.0.0"  # nosec B104  # containerized service; binding to all interfaces is intentional
-    port: int = 8000
 
 
 settings = Settings()

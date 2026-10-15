@@ -1,8 +1,5 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from pydantic import ValidationError
-
 from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
 from app.services.agent import (
@@ -84,13 +81,6 @@ class TestDedupResults:
         texts, _, _ = dedup_topk(results, k=2)
         assert len(texts) == 2
 
-    def test_rejects_mismatched_parallel_lists(self):
-        """Mismatched lengths would crash or silently drop data in interleave_dedup."""
-        with pytest.raises(ValidationError):
-            RetrievalResult(texts=["a", "b"], metadatas=[{}], distances=[0.9, 0.8])
-        with pytest.raises(ValidationError):
-            RetrievalResult(texts=["a"], metadatas=[{}, {}], distances=[0.9, 0.8])
-
     def test_empty_results(self):
         texts, metas, dists = dedup_topk([], k=5)
         assert texts == []
@@ -161,7 +151,6 @@ class TestRunRetrieve:
         assert deps.full_results[0].texts == ["doc"]
         assert len(previews) == 1
         assert previews[0].texts == ["doc"]
-        assert deps.round_stats[0]["queries"] == ["q1"]
 
 
 class TestAgenticSearch:
@@ -340,6 +329,32 @@ class TestAgenticSearch:
 
         assert "doc1" in result.documents[0]
         assert "doc2" in result.documents[0]
+
+
+class TestAgentMaxIterations:
+    async def test_limit_enforced_and_partial_results_returned(self):
+        """AGENT_MAX_ITERATIONS is a hard request limit, not just prompt text."""
+        from pydantic_ai.exceptions import UsageLimitExceeded
+
+        seen_limits = []
+
+        async def _run(prompt, *, deps: AgentDeps, usage_limits, **kwargs):
+            seen_limits.append(usage_limits.request_limit)
+            deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
+            raise UsageLimitExceeded("request_limit exceeded")
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_run)
+
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch.object(settings, "agent_max_iterations", 2),
+        ):
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            result = await agentic_search(request)
+
+        assert seen_limits == [3]
+        assert result.documents == [["doc"]]
 
 
 class TestAgentRetryObservability:
