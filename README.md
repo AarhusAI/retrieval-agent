@@ -15,8 +15,8 @@ this service.
 
 - Docker and Docker Compose
 - [Task](https://taskfile.dev/) (Go Task runner)
-- Access to a Qdrant instance (shared with Open WebUI)
-- An OpenAI-compatible embedding endpoint matching Open WebUI's RAG config
+- Access to the Qdrant instance populated by the ingestion service
+- An OpenAI-compatible embedding endpoint serving the model the ingestion service indexed with
 - *(For agentic mode or query generation)* An LLM endpoint (e.g. LiteLLM proxy)
 
 ## Quick Start
@@ -160,50 +160,52 @@ calibrated for cosine scores (e.g. `0.5`) silently drops *every* result on the R
 
 ## Configuration
 
-All settings are environment variables (or `.env` file). See [`.env.example`](.env.example) for the full list.
+All settings are environment variables (or `.env` file); [`.env.example`](.env.example) has the same list with longer
+comments and example prompt overrides. Invalid values (weak `API_KEY`, empty `EMBEDDING_API_BASE_URL`, unknown
+`RERANK_FUSION`/`SPARSE_QUERY_PROVIDER`/`LOG_*` values) stop the service at startup.
 
-| Variable                              | Default                                       | Description                                                                                                  |
-|---------------------------------------|-----------------------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `API_KEY`                             | *(required)*                                  | Must match `RAG_EXTERNAL_RETRIEVAL_API_KEY` in Open WebUI; at least 32 characters                                |
-| `QDRANT_URI`                          | `http://qdrant:6333`                          | Qdrant connection URL                                                                                        |
-| `QDRANT_API_KEY`                      | *(required by compose)*                       | Qdrant API key                                                                                                   |
-| `QDRANT_INDEX`                        | `ingestion_files`                             | Single physical Qdrant collection written by the ingestion service                                           |
-| `EMBEDDING_MODEL`                     | `intfloat/multilingual-e5-large`              | Must match the embedding model the ingestion service used at index time                                      |
-| `EMBEDDING_API_BASE_URL`              | *(required)*                                  | OpenAI-compatible embedding endpoint                                                                             |
-| `EMBEDDING_API_KEY`                   | *(required by compose)*                       | API key for embedding endpoint                                                                                   |
-| `EMBEDDING_PREFIX_QUERY`              | `query:`                                      | Query-side prefix (must match what ingestion used; e.g. `"query: "` for e5, empty for bge-m3)                |
-| `ENABLE_HYBRID_SEARCH`                | `false`                                       | Enable hybrid retrieval — native sparse+dense (when collection has `text-sparse`) or BM25 fallback otherwise |
-| `HYBRID_BM25_WEIGHT`                  | `0.3`                                         | BM25 weight in the client-side BM25 fallback fusion (vector weight = 1 − this; unused on the native path)    |
-| `BM25_CACHE_TTL_SECONDS`              | `300`                                         | TTL for the client-side BM25 index cache (only consulted on the fallback path)                               |
-| `BM25_MAX_DOCS`                       | `10000`                                       | Cap on documents pulled into the in-memory BM25 index per collection scope (OOM guard)                           |
-| `SPARSE_QUERY_PROVIDER`               | `fastembed`                                   | `fastembed` runs a sparse model in-process; `none` disables sparse and forces dense-only on the native path      |
-| `SPARSE_QUERY_MODEL`                  | `Qdrant/bm42-all-minilm-l6-v2-attentions`     | Must match the sparse model the ingestion service used for indexing                                          |
-| `ENABLE_RERANKING`                    | `false`                                       | Enable cross-encoder reranking stage                                                                         |
-| `RERANKER_MODEL`                      | `cross-encoder/ms-marco-MiniLM-L-6-v2`        | Cross-encoder model for reranking                                                                            |
-| `RERANKER_API_BASE_URL`               |                                               | OpenAI-compatible reranker endpoint (e.g. `https://embed.itkdev.dk`)                                         |
-| `RERANKER_API_KEY`                    |                                               | API key for reranker endpoint                                                                                |
-| `RERANK_FUSION`                       | `rrf`                                         | `rrf` fuses retrieval and cross-encoder order; `replace` = cross-encoder order only                              |
-| `RERANK_RRF_K`                        | `60`                                          | RRF constant for `RERANK_FUSION=rrf` (higher = flatter)                                                          |
-| `INITIAL_RETRIEVAL_MULTIPLIER`        | `3`                                           | Fetch k × multiplier candidates before reranking (linear pipeline)                                           |
-| `ENABLE_QUERY_GENERATION`             | `true`                                        | Enable LLM-based query generation from chat messages (linear pipeline only)                                  |
-| `RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE` |                                               | Override the query-generation prompt (`$current_date`, `$chat_history`; built-in prompt when empty)              |
-| `ENABLE_AGENTIC_RAG`                  | `false`                                       | Route to the agentic pipeline (LLM-driven retrieval loop) instead of the linear one                          |
-| `AGENT_MODEL`                         | `gpt-4o-mini`                                 | LLM model for agent decisions and query generation                                                           |
-| `AGENT_API_BASE_URL`                  | `http://litellm:4000/v1`                      | LLM endpoint for agent (defaults to LiteLLM proxy)                                                           |
-| `AGENT_API_KEY`                       |                                               | API key for agent LLM endpoint                                                                               |
-| `AGENT_MAX_ITERATIONS`                | `3`                                           | Max retrieve rounds; enforced as an LLM request limit (rounds + 1), returns partial results when hit             |
-| `AGENT_TOOL_PREVIEW_CHARS`            | `200`                                         | Max chars of document text sent to the agent for grading (full text stored side-channel)                     |
-| `AGENT_STRICT_TOOLS`                  | `true`                                        | Strict PydanticAI tool definitions (disable for models that don't support strict tool schemas)               |
-| `AGENT_TIMEOUT`                       | `60`                                          | Wall-clock timeout (seconds) for the agent run — returns partial results on timeout                          |
-| `AGENT_SYSTEM_PROMPT`                 |                                               | Override the default agent system prompt (uses built-in prompt when empty)                                   |
-| `AGENT_FETCH_K`                       | `20`                                          | Internal per-query candidate pool size; decoupled from `request.k` so a small `top_k` doesn't starve grading |
-| `AGENT_PREVIEW_K`                     | `5`                                           | Max previews returned to the agent per `retrieve` call (caps context-window pressure across iterations)      |
-| `AGENT_CONVERSATION_HISTORY_MESSAGES` | `4`                                           | How many trailing chat messages to include verbatim in the agent's user prompt                               |
-| `AGENT_INCLUDE_RAW_QUERY`             | `true`                                        | Seed retrieval with the user's original query before the agent loop (guards against rewrite drift)               |
-| `LOG_LEVEL`                           | `INFO`                                        | Root log verbosity: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (third-party libs follow it too)             |
-| `LOG_LEVEL_APP`                       | `` (inherits `LOG_LEVEL`)                     | Override for `app.*` loggers only, e.g. `DEBUG` without third-party DEBUG noise; empty inherits `LOG_LEVEL`  |
-| `LOG_FORMAT`                          | `text`                                        | `text` = human-readable single line; `json` = one JSON object per line for Loki / a structured-log pipeline  |
-| `METRICS_ENABLED`                     | `true`                                        | Expose Prometheus metrics at `GET /metrics` (instrumentation always runs; `false` → endpoint returns 404)    |
+| Variable                                     | Default                                   | Description                                                                                                       |
+|----------------------------------------------|-------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| `API_KEY`                                    | *(required)*                              | Must match `RAG_EXTERNAL_RETRIEVAL_API_KEY` in Open WebUI; at least 32 characters                                 |
+| `QDRANT_URI`                                 | `http://qdrant:6333`                      | Qdrant connection URL — the instance the ingestion service writes to                                              |
+| `QDRANT_API_KEY`                             | *(required by compose)*                   | Qdrant API key                                                                                                    |
+| `QDRANT_INDEX`                               | `ingestion_files`                         | Single physical Qdrant collection written by the ingestion service                                                |
+| `EMBEDDING_MODEL`                            | `intfloat/multilingual-e5-large`          | Must match the embedding model the ingestion service used at index time                                           |
+| `EMBEDDING_API_BASE_URL`                     | *(required)*                              | OpenAI-compatible embedding endpoint **including** `/v1` (`/embeddings` is appended)                              |
+| `EMBEDDING_API_KEY`                          | *(required by compose)*                   | API key for embedding endpoint                                                                                    |
+| `EMBEDDING_PREFIX_QUERY`                     | `"query: "`                               | Query-side prefix; must match ingestion (`"query: "` for e5, empty for bge-m3). Quote to keep the space           |
+| `ENABLE_HYBRID_SEARCH`                       | `false`                                   | Hybrid retrieval — native sparse+dense when the collection has `text-sparse`, else client-side BM25               |
+| `HYBRID_BM25_WEIGHT`                         | `0.3`                                     | BM25 weight in the client-side BM25 fusion (vector weight = 1 − this; unused on the native path)                  |
+| `BM25_CACHE_TTL_SECONDS`                     | `300`                                     | TTL for the client-side BM25 index cache (BM25 fallback path only)                                                |
+| `BM25_MAX_DOCS`                              | `10000`                                   | Max documents scrolled into the in-memory BM25 index per collection scope (OOM guard)                             |
+| `SPARSE_QUERY_PROVIDER`                      | `fastembed`                               | `fastembed` runs the sparse model in-process; `none` forces dense-only on the native path                         |
+| `SPARSE_QUERY_MODEL`                         | `Qdrant/bm42-all-minilm-l6-v2-attentions` | Must match the sparse model the ingestion service used for indexing                                               |
+| `ENABLE_RERANKING`                           | `false`                                   | Enable the cross-encoder reranking stage (fails open to unranked results on any reranker error)                   |
+| `RERANKER_MODEL`                             | `cross-encoder/ms-marco-MiniLM-L-6-v2`    | Cross-encoder model for reranking                                                                                 |
+| `RERANKER_API_BASE_URL`                      | *(required if reranking)*                 | Reranker endpoint **without** `/v1` (`/v1/rerank` is appended), e.g. `https://embed.itkdev.dk`                    |
+| `RERANKER_API_KEY`                           |                                           | API key for reranker endpoint                                                                                     |
+| `RERANK_FUSION`                              | `rrf`                                     | `rrf` fuses retrieval and cross-encoder order; `replace` = cross-encoder order only                               |
+| `RERANK_RRF_K`                               | `60`                                      | RRF constant for `RERANK_FUSION=rrf` (higher = flatter)                                                           |
+| `INITIAL_RETRIEVAL_MULTIPLIER`               | `3`                                       | With reranking, fetch `k ×` this many candidates before reranking (linear pipeline only)                          |
+| `ENABLE_QUERY_GENERATION`                    | `true`                                    | LLM query generation from `messages` (linear pipeline only; uses the `AGENT_*` LLM settings)                      |
+| `RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE` |                                           | Override the query-generation prompt (linear only; `$current_date`, `$chat_history`). A per-request template wins |
+| `ENABLE_AGENTIC_RAG`                         | `false`                                   | Route to the agentic pipeline (LLM-driven retrieval loop) instead of the linear one                               |
+| `AGENT_MODEL`                                | `gpt-4o-mini`                             | LLM for the agent loop and linear query generation; must exist on the LLM endpoint                                |
+| `AGENT_API_BASE_URL`                         | `http://litellm:4000/v1`                  | OpenAI-compatible LLM endpoint (defaults to the LiteLLM proxy)                                                    |
+| `AGENT_API_KEY`                              |                                           | API key for the LLM endpoint                                                                                      |
+| `AGENT_MAX_ITERATIONS`                       | `3`                                       | Max retrieve rounds; enforced as an LLM request limit (rounds + 1), returns partial results when hit              |
+| `AGENT_TOOL_PREVIEW_CHARS`                   | `200`                                     | Max chars of document text sent to the agent for grading (full text kept side-channel)                            |
+| `AGENT_STRICT_TOOLS`                         | `true`                                    | Strict tool schemas; disable for models that don't support them                                                   |
+| `AGENT_TIMEOUT`                              | `60`                                      | Wall-clock timeout (seconds) for the agent run, also the per-LLM-call HTTP timeout; partial results on timeout    |
+| `AGENT_SYSTEM_PROMPT`                        |                                           | Override the built-in agent system prompt (used when empty)                                                       |
+| `AGENT_FETCH_K`                              | `20`                                      | Per-query candidate pool in agentic mode; decoupled from `request.k` so a small `top_k` doesn't starve grading    |
+| `AGENT_PREVIEW_K`                            | `5`                                       | Max previews returned to the agent per `retrieve` call (caps context-window growth)                               |
+| `AGENT_CONVERSATION_HISTORY_MESSAGES`        | `4`                                       | Trailing chat messages included in the agent prompt and in linear query generation                                |
+| `AGENT_INCLUDE_RAW_QUERY`                    | `true`                                    | Seed retrieval with the user's original query before the agent loop (guards against rewrite drift)                |
+| `LOG_LEVEL`                                  | `INFO`                                    | Root log level: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (third-party libs follow it)                          |
+| `LOG_LEVEL_APP`                              | *(empty — inherits `LOG_LEVEL`)*          | Override for `app.*` loggers only, e.g. `DEBUG` without third-party DEBUG noise                                   |
+| `LOG_FORMAT`                                 | `text`                                    | `text` = human-readable single line; `json` = one JSON object per line (Loki)                                     |
+| `METRICS_ENABLED`                            | `true`                                    | Expose Prometheus metrics at `GET /metrics` (`false` → 404; instrumentation always runs)                          |
 
 ### Critical: Keeping Settings in Sync
 
@@ -297,10 +299,12 @@ the results are completely off-topic.
 4. **Fallback** — if the agent emits queries as text instead of calling the tool, `_parse_fallback_queries` extracts
    them (plain JSON or Mistral `[TOOL_CALLS]` syntax) and runs a direct vector search; rerank is intentionally
    skipped on this path.
-5. **Timeout** — `AGENT_TIMEOUT` is wall-clock. On timeout, whatever the tool already wrote to `full_results` is
-   returned (partial results, not 500s).
-6. **Dedup** by content hash across all accumulated results, limit to `k`. The response uses full text from the
-   side-channel, not the truncated previews the agent saw.
+5. **Raw-query seed** — with `AGENT_INCLUDE_RAW_QUERY=true`, the user's original query is retrieved once before the
+   agent loop and seeds `full_results`, so recall doesn't depend on how the agent rewrites it.
+6. **Limits** — `AGENT_TIMEOUT` (wall-clock) and `AGENT_MAX_ITERATIONS` (LLM request limit). When either is hit,
+   whatever is already in `full_results` is returned (partial results, not 500s).
+7. **Dedup** — the per-query result sets are interleaved round-robin and deduped by exact text, limited to `k`. The
+   response uses full text from the side-channel, not the truncated previews the agent saw.
 
 ### Notes
 
@@ -377,5 +381,6 @@ exception class name, never a raw message.
 ### Debugging a single request
 
 There is no separate trace endpoint — the agent loop is ephemeral and persisted nowhere queryable. To debug
-one request, set `LOG_LEVEL=DEBUG` and read the container logs: the resolved queries, each retrieve round's
-queries and candidate scores, the retry line, and per-step token usage all appear in that request's log stream.
+one request, set `LOG_LEVEL_APP=DEBUG` (or `LOG_LEVEL=DEBUG`) and read the container logs: the resolved queries,
+each retrieve round's queries and candidate scores, the retry line, and per-step token usage all appear in that
+request's log stream.

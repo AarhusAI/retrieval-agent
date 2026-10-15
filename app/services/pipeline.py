@@ -191,7 +191,7 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
     3. Single Qdrant query per dense query, scoped to all collection_names
     4. Optional client-side BM25 RRF (only when hybrid is on AND no sparse)
     5. Optional cross-encoder reranking
-    6. Dedup by MD5, limit to k
+    6. Dedup by exact text, limit to k
 
     Queries run concurrently — each query's retrieve/fuse/rerank chain is
     independent, so per-query wall-clock doesn't stack up.

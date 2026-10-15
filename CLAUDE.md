@@ -196,5 +196,5 @@ other systems**, not knobs:
   skips (returns `False` without caching so first post-ingest query re-detects).
 - The agentic loop is bounded by both `AGENT_MAX_ITERATIONS` (enforced as a PydanticAI `UsageLimits` request limit of
   iterations + 1; also stated in the built-in system prompt) and `AGENT_TIMEOUT` (hard wall-clock). Both return the
-  partial `full_results` when hit. Tool results accumulate across iterations in the conversation history — watch the agent model's context
-  window.
+  partial `full_results` when hit. Tool results accumulate across iterations in the conversation history — watch the
+  agent model's context window.

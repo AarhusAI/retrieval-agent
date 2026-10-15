@@ -17,9 +17,9 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 - `RERANK_FUSION` (`rrf`|`replace`) and `SPARSE_QUERY_PROVIDER` (`fastembed`|`none`) are validated at startup; a typo
   no longer silently selects the other branch. `SPARSE_QUERY_PROVIDER` is now case-sensitive.
-- Removed `HOST`/`PORT` settings and the unused `python -m app.main` runner; the bind address is set by the uvicorn
-  command in the Dockerfile/compose.
-- README configuration table lists all settings; CLAUDE.md references `LOG_LEVEL_APP` instead of the removed `DEBUG`.
+- Removed `HOST`/`PORT` settings
+- README configuration docs corrected
+- README configuration table lists all settings
 
 ## [0.0.4] - 2026-10-06
 
