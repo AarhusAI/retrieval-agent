@@ -16,6 +16,7 @@ collection lacks sparse vectors.
 
 import asyncio
 import logging
+from typing import Any
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -63,15 +64,6 @@ def close_client() -> None:
 # ---------------------------------------------------------------------------
 
 _sparse_capable: bool | None = None
-
-
-def collection_exists() -> bool:
-    """True iff the configured Qdrant collection currently exists."""
-    try:
-        get_client().get_collection(settings.qdrant_index)
-        return True
-    except (UnexpectedResponse, ValueError):
-        return False
 
 
 def has_sparse_vectors() -> bool:
@@ -142,18 +134,15 @@ async def vector_search(
     * Single physical Qdrant collection (``settings.qdrant_index``).
     * Filter scoped to ``meta.collection_name IN (collection_names)``.
     * Hybrid (dense + sparse, RRF-fused server-side) when ``sparse_vector`` is
-      provided AND the collection has sparse vectors. Dense-only fallback
-      otherwise.
+      provided — the caller only produces one after probing
+      :func:`has_sparse_vectors`. Dense-only otherwise.
     * Returns ``RetrievalResult``. Distances are normalized cosine for the dense
       path (``(score + 1) / 2``) and raw RRF scores for the hybrid path.
     """
     client = get_client()
     qdrant_collection = settings.qdrant_index
     qfilter = _collection_name_filter(collection_names)
-
-    # The sync QdrantClient blocks; run capability probe and query in a worker
-    # thread so a slow Qdrant call doesn't stall the whole event loop.
-    use_hybrid = sparse_vector is not None and await asyncio.to_thread(has_sparse_vectors)
+    use_hybrid = sparse_vector is not None
 
     log.info(
         "vector_search: collections=%s (qdrant=%s, hybrid=%s) k=%d",
@@ -163,39 +152,28 @@ async def vector_search(
         k,
     )
 
+    kw: dict[str, Any]
+    if use_hybrid:
+        kw = dict(
+            prefetch=[
+                models.Prefetch(
+                    query=query_vector, using=DENSE_VECTOR_NAME, limit=k * 2, filter=qfilter
+                ),
+                models.Prefetch(
+                    query=sparse_vector, using=SPARSE_VECTOR_NAME, limit=k * 2, filter=qfilter
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+        )
+    else:
+        kw = dict(query=query_vector, using=DENSE_VECTOR_NAME, query_filter=qfilter)
+
     try:
-        if use_hybrid:
-            response = await asyncio.to_thread(
-                lambda: client.query_points(
-                    collection_name=qdrant_collection,
-                    prefetch=[
-                        models.Prefetch(
-                            query=query_vector,
-                            using=DENSE_VECTOR_NAME,
-                            limit=k * 2,
-                            filter=qfilter,
-                        ),
-                        models.Prefetch(
-                            query=sparse_vector,
-                            using=SPARSE_VECTOR_NAME,
-                            limit=k * 2,
-                            filter=qfilter,
-                        ),
-                    ],
-                    query=models.FusionQuery(fusion=models.Fusion.RRF),
-                    limit=k,
-                )
-            )
-        else:
-            response = await asyncio.to_thread(
-                lambda: client.query_points(
-                    collection_name=qdrant_collection,
-                    query=query_vector,
-                    using=DENSE_VECTOR_NAME,
-                    query_filter=qfilter,
-                    limit=k,
-                )
-            )
+        # The sync QdrantClient blocks; query in a worker thread so a slow
+        # Qdrant call doesn't stall the whole event loop.
+        response = await asyncio.to_thread(
+            lambda: client.query_points(collection_name=qdrant_collection, limit=k, **kw)
+        )
     except UnexpectedResponse:
         log.exception("Qdrant query failed for collection %s", qdrant_collection)
         return RetrievalResult(texts=[], metadatas=[], distances=[])

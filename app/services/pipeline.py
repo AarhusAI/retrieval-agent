@@ -51,9 +51,6 @@ async def embed_dense_and_sparse(
     and downstream callers fall back to dense-only retrieval (with optional
     client-side BM25 RRF if hybrid is on).
     """
-    if not queries:
-        return [], [], False
-
     async with metrics.time_stage("embed_dense"):
         vectors = await embedding.embed_queries(queries)
     # has_sparse_vectors hits Qdrant (sync client) until its answer is cached —
@@ -61,19 +58,14 @@ async def embed_dense_and_sparse(
     use_native_hybrid = settings.enable_hybrid_search and await asyncio.to_thread(
         qdrant.has_sparse_vectors
     )
-    if use_native_hybrid:
-        async with metrics.time_stage("embed_sparse"):
-            sparse_vectors: list[SparseVector | None] = await sparse_embedding.embed_queries(
-                queries
-            )
-    else:
-        sparse_vectors = [None] * len(queries)
-
-    # Record which fusion path this search will take so operators can see
-    # whether native server-side RRF, the client-side BM25 fallback, or
+    # The metric records which fusion path this search takes so operators can
+    # see whether native server-side RRF, the client-side BM25 fallback, or
     # dense-only retrieval is actually running.
+    sparse_vectors: list[SparseVector | None] = [None] * len(queries)
     if use_native_hybrid:
         path = "native_sparse"
+        async with metrics.time_stage("embed_sparse"):
+            sparse_vectors = await sparse_embedding.embed_queries(queries)
     elif settings.enable_hybrid_search:
         path = "bm25_fallback"
     else:
@@ -191,7 +183,7 @@ async def linear_search(request: SearchRequest) -> SearchResponse:
     3. Single Qdrant query per dense query, scoped to all collection_names
     4. Optional client-side BM25 RRF (only when hybrid is on AND no sparse)
     5. Optional cross-encoder reranking
-    6. Dedup by MD5, limit to k
+    6. Dedup by exact text, limit to k
 
     Queries run concurrently — each query's retrieve/fuse/rerank chain is
     independent, so per-query wall-clock doesn't stack up.

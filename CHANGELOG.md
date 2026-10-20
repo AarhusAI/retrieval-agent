@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ## [Unreleased]
 
+### Fixed
+
+- `AGENT_MAX_ITERATIONS` is now enforced as a PydanticAI request limit (iterations + 1) instead of only being stated in
+  the system prompt; hitting it returns the partial results gathered so far.
+- `BM25_MAX_DOCS`, `RERANK_FUSION`, `RERANK_RRF_K` and `AGENT_INCLUDE_RAW_QUERY` are passed through `docker-compose.yml`
+  (previously only picked up via the mounted `.env` in dev).
+
+### Changed
+
+- `RERANK_FUSION` (`rrf`|`replace`) and `SPARSE_QUERY_PROVIDER` (`fastembed`|`none`) are validated at startup; a typo
+  no longer silently selects the other branch. `SPARSE_QUERY_PROVIDER` is now case-sensitive.
+- `LOG_FORMAT` (`text`|`json`) is validated the same way and is now case-sensitive.
+- Startup logs the configuration as a single `Config:` line from an explicit allowlist of settings (credentials and
+  prompt templates are never included) instead of one line per setting.
+- Simplified code: the linear pipeline and the agent fallback share one query parser, the agent's raw-query seed is
+  inlined, the per-round `round_stats` DEBUG line is gone (the same data is already logged per query), `vector_search`
+  trusts the caller's sparse vector instead of re-probing the collection, and the bearer-auth dependency is declared
+  on the route decorator.
+- Removed `HOST`/`PORT` settings
+- README configuration table lists all settings
+
+## [0.0.4] - 2026-10-06
+
 ### Added
 
 - GitHub Actions workflows and lint tasks (markdown, YAML).
@@ -19,9 +42,6 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 - Per-query retrieval runs concurrently in the linear pipeline.
 - Auth returns 401 with `WWW-Authenticate` on missing/invalid credentials (was 403).
 - Query generation honours `AGENT_CONVERSATION_HISTORY_MESSAGES`.
-- Simplified app code (about 260 fewer lines): embedding and reranker share one HTTP client, both pipelines share one
-  dedup helper (exact-text instead of MD5), the agent's three per-query retrieval loops are one helper, and
-  `QdrantResult` is merged into `RetrievalResult`.
 - Request validation uses pydantic's built-in `max_length`/`pattern` checks, so 422 messages use pydantic's wording.
 - The agent fallback parser takes the outermost `{...}` after the last `[TOOL_CALLS]` marker (or in the whole output
   when absent), covering plain JSON and `[TOOL_CALLS]` text.
@@ -73,6 +93,7 @@ First tagged release.
 
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [Semantic Versioning]: https://semver.org/spec/v2.0.0.html
-[unreleased]: https://github.com/AarhusAI/retrieval-agent/compare/0.0.3...HEAD
+[unreleased]: https://github.com/AarhusAI/retrieval-agent/compare/0.0.4...HEAD
+[0.0.4]: https://github.com/AarhusAI/retrieval-agent/releases/tag/0.0.4
 [0.0.3]: https://github.com/AarhusAI/retrieval-agent/releases/tag/0.0.3
 [0.0.2]: https://github.com/AarhusAI/retrieval-agent/releases/tag/0.0.2

@@ -163,8 +163,10 @@ other systems**, not knobs:
 - `AGENT_SYSTEM_PROMPT` — same idea for the agent loop.
 - `AGENT_STRICT_TOOLS` — disable for models that don't support PydanticAI strict tool definitions (combine with the
   fallback parser).
-- `DEBUG=true` enables debug logging on the `app` logger, which includes per-step token usage for agent LLM calls and
-  query generation.
+- `LOG_LEVEL_APP=DEBUG` enables debug logging on the `app` logger only (no third-party DEBUG flood), which includes
+  per-step token usage for agent LLM calls and query generation.
+- `RERANK_FUSION` (`rrf`|`replace`) and `SPARSE_QUERY_PROVIDER` (`fastembed`|`none`) are `Literal`-typed — a typo
+  fails at startup instead of silently picking the other branch.
 
 ## Rules
 
@@ -192,6 +194,7 @@ other systems**, not knobs:
   collection is recreated with a different vector config, call `reset_sparse_capability()` or restart the service —
   otherwise the wrong hybrid path keeps running. Cold-start before any ingest is the one case the cache deliberately
   skips (returns `False` without caching so first post-ingest query re-detects).
-- The agentic loop is bounded by both `AGENT_MAX_ITERATIONS` (per-loop iterations) and `AGENT_TIMEOUT` (hard
-  wall-clock). Tool results accumulate across iterations in the conversation history — watch the agent model's context
-  window.
+- The agentic loop is bounded by both `AGENT_MAX_ITERATIONS` (enforced as a PydanticAI `UsageLimits` request limit of
+  iterations + 1; also stated in the built-in system prompt) and `AGENT_TIMEOUT` (hard wall-clock). Both return the
+  partial `full_results` when hit. Tool results accumulate across iterations in the conversation history — watch the
+  agent model's context window.
