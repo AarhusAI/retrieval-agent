@@ -12,7 +12,8 @@ async def embed_queries(queries: list[str]) -> list[list[float]]:
         # OpenAI-compatible APIs reject an empty input list.
         return []
 
-    prefixed = [f"{settings.embedding_prefix_query}{q}" for q in queries]
+    cap = settings.embedding_max_query_chars
+    prefixed = [f"{settings.embedding_prefix_query}{q[:cap]}" for q in queries]
 
     url = f"{settings.embedding_api_base_url.rstrip('/')}/embeddings"
     payload = {"model": settings.embedding_model, "input": prefixed}

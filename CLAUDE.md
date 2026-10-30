@@ -79,15 +79,16 @@ Several pieces of agent behaviour worth knowing because they are not obvious fro
   it.
 - **Raw-query seed.** With `AGENT_INCLUDE_RAW_QUERY` (default on), `agentic_search` runs one deterministic retrieval
   pass with the user's _original_ query before the agent loop and seeds `full_results`; the agent's own retrievals then
-  append. So the unmodified question is always searched regardless of how the agent rewrites it — guarding recall
+  follow it. So the unmodified question is always searched regardless of how the agent rewrites it — guarding recall
   against query-rewrite drift (e.g. an upstream web-search-style `RETRIEVAL_QUERY_GENERATION_PROMPT_TEMPLATE`). Failures
   in the seed pass are swallowed; it's a safety-net, not a hard dependency.
 - **Fallback parser.** If the agent emits queries as text instead of calling the tool, `_parse_fallback_queries()`
   (`app/services/agent.py`) extracts them — handles plain JSON and Mistral `[TOOL_CALLS]` syntax. Wrapped in exception
-  handling: embedding/Qdrant failures inside the fallback return empty results, not 500s.
-- **Timeout & accumulation.** `AGENT_TIMEOUT` is wall-clock. On timeout, whatever was already written to
-  `AgentDeps.full_results` (raw-query seed + any completed `retrieve` calls) is returned. Multiple `retrieve` calls
-  (corrective retries) **append** to `full_results`; they don't overwrite.
+  handling: embedding/Qdrant failures inside the fallback keep whatever the seed found, not 500s.
+- **Timeout & retries.** `AGENT_TIMEOUT` is one wall-clock budget for the seed plus the agent run. On timeout, whatever
+  was already written to `AgentDeps.full_results` is returned. A corrective `retrieve` retry **replaces** the previous
+  agent round but keeps the seed (`AgentDeps.seed_count`). The fallback fires when `AgentDeps.tool_called` is false
+  and appends to the seed.
 
 When reranking is enabled, initial retrieval fetches `k * INITIAL_RETRIEVAL_MULTIPLIER` candidates. The agent path uses
 `AGENT_FETCH_K` instead — decoupled from `request.k` so a small Open WebUI `top_k` doesn't starve the grading pool; only
@@ -188,13 +189,13 @@ other systems**, not knobs:
   hit the cross-encoder underranks isn't buried out of top-`k`. The returned `distance` is still the cross-encoder
   relevance score (only the _ordering_ is fused). Set `RERANK_FUSION=replace` for the old cross-encoder-only behaviour.
   Callers must pass documents in retrieval-score order (the input index is treated as the retrieval rank).
-- **Qdrant errors are loud on purpose**: `vector_search` catches only `UnexpectedResponse` (e.g. collection not found).
-  Connection errors and auth failures propagate as 500s so they're visible.
+- **Qdrant errors are loud on purpose**: `vector_search` swallows only a 404 `UnexpectedResponse` (collection not
+  found). Dimension mismatches, bad filters, connection and auth errors propagate as 500s so they're visible.
 - **Sparse capability is detected once.** `has_sparse_vectors()` caches the answer for the process lifetime. If the
   collection is recreated with a different vector config, call `reset_sparse_capability()` or restart the service —
   otherwise the wrong hybrid path keeps running. Cold-start before any ingest is the one case the cache deliberately
   skips (returns `False` without caching so first post-ingest query re-detects).
 - The agentic loop is bounded by both `AGENT_MAX_ITERATIONS` (enforced as a PydanticAI `UsageLimits` request limit of
   iterations + 1; also stated in the built-in system prompt) and `AGENT_TIMEOUT` (hard wall-clock). Both return the
-  partial `full_results` when hit. Tool results accumulate across iterations in the conversation history — watch the
+  partial `full_results` when hit. Tool previews accumulate across iterations in the conversation history — watch the
   agent model's context window.

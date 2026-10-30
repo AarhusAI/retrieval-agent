@@ -174,8 +174,12 @@ async def vector_search(
         response = await asyncio.to_thread(
             lambda: client.query_points(collection_name=qdrant_collection, limit=k, **kw)
         )
-    except UnexpectedResponse:
-        log.exception("Qdrant query failed for collection %s", qdrant_collection)
+    except UnexpectedResponse as exc:
+        # Only a missing collection means "no results"; anything else (dimension
+        # mismatch, bad filter, ...) is a misconfiguration and must be loud.
+        if exc.status_code != 404:
+            raise
+        log.warning("Qdrant collection %s not found; returning no results", qdrant_collection)
         return RetrievalResult(texts=[], metadatas=[], distances=[])
 
     texts: list[str] = []

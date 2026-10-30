@@ -61,6 +61,21 @@ async def test_embed_queries_applies_prefix():
     assert "test query" in call_payload["input"][0]
 
 
+async def test_embed_queries_truncates_long_query():
+    mock_response = httpx.Response(
+        200,
+        json={"data": [{"index": 0, "embedding": [0.1]}]},
+        request=_FAKE_REQUEST,
+    )
+    with patch.object(
+        httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_response
+    ) as mock_post:
+        await embed_queries(["x" * 5000])
+
+    sent = mock_post.call_args[1]["json"]["input"][0]
+    assert len(sent) == len(settings.embedding_prefix_query) + settings.embedding_max_query_chars
+
+
 async def test_embed_queries_empty_input_skips_api_call():
     """Empty input must short-circuit — OpenAI-compatible APIs reject input=[]."""
     with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:

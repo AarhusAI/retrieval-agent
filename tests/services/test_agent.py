@@ -1,7 +1,10 @@
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.config import settings
 from app.models import ChatMessage, SearchRequest, SearchResponse
+from app.services import agent as agent_module
 from app.services.agent import (
     AgentDeps,
     RetrievalResult,
@@ -31,6 +34,7 @@ def _make_mock_agent(full_results: list[RetrievalResult]):
     mock_agent_result.usage = _mock_usage()
 
     async def _run(prompt, *, deps: AgentDeps, **kwargs):
+        deps.tool_called = True
         deps.full_results = full_results
         return mock_agent_result
 
@@ -130,7 +134,7 @@ class TestRunRetrieve:
 
         mock_embed.assert_not_called()
         assert previews == []
-        assert deps.full_results == []  # set (not None) → fallback won't fire
+        assert deps.tool_called is True  # stops the no-tool-call fallback
 
     async def test_non_empty_queries_retrieve_and_accumulate(self):
         deps = AgentDeps(collection_names=["coll1"], k=5, fetch_k=20)
@@ -151,6 +155,27 @@ class TestRunRetrieve:
         assert deps.full_results[0].texts == ["doc"]
         assert len(previews) == 1
         assert previews[0].texts == ["doc"]
+
+    async def test_retry_replaces_previous_round_keeps_seed(self):
+        seed = RetrievalResult(texts=["seed"], metadatas=[{}], distances=[0.5])
+        deps = AgentDeps(collection_names=["coll1"], k=5, fetch_k=20)
+        deps.full_results = [seed]
+        deps.seed_count = 1
+
+        async def _embed(queries):
+            return ([[0.1]] * len(queries), [None] * len(queries), False)
+
+        async def _retrieve_one(query_text, *args, **kwargs):
+            return ([query_text], [{}], [0.9])
+
+        with (
+            patch("app.services.agent.embed_dense_and_sparse", AsyncMock(side_effect=_embed)),
+            patch("app.services.agent.retrieve_one_query", AsyncMock(side_effect=_retrieve_one)),
+        ):
+            await _run_retrieve(deps, ["doc1"])
+            await _run_retrieve(deps, ["doc2"])
+
+        assert [r.texts for r in deps.full_results] == [["seed"], ["doc2"]]
 
 
 class TestAgenticSearch:
@@ -191,6 +216,7 @@ class TestAgenticSearch:
         drift = RetrievalResult(texts=["toc"], metadatas=[{"source": "toc"}], distances=[0.9])
 
         async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.tool_called = True
             deps.full_results = (deps.full_results or []) + [drift]
             result = MagicMock()
             result.output = "done"
@@ -297,38 +323,68 @@ class TestAgenticSearch:
         assert isinstance(result, SearchResponse)
         assert result.documents == [[]]
 
-    async def test_retrieve_accumulates_results_across_retries(self):
-        """When agent calls retrieve twice, results from both calls are accumulated."""
-        first_results = [
-            RetrievalResult(texts=["doc1"], metadatas=[{"src": "a"}], distances=[0.9])
-        ]
-        second_results = [
-            RetrievalResult(texts=["doc2"], metadatas=[{"src": "b"}], distances=[0.8])
-        ]
-
-        call_count = 0
-
-        async def _run(prompt, *, deps: AgentDeps, **kwargs):
-            nonlocal call_count
-            # Simulate two retrieve calls by building up full_results
-            deps.full_results = (deps.full_results or []) + first_results
-            deps.full_results = (deps.full_results or []) + second_results
-            call_count += 1
-            mock_result = MagicMock()
-            mock_result.output = "done"
-            mock_result.usage = _mock_usage()
-            mock_result.all_messages.return_value = []
-            return mock_result
-
+    async def test_fallback_runs_with_seed(self):
+        """No tool call + a filled seed must still trigger the fallback, appending to the seed."""
+        mock_agent_result = MagicMock()
+        mock_agent_result.output = '{"queries": ["fb q"]}'
+        mock_agent_result.usage = _mock_usage()
+        mock_agent_result.all_messages.return_value = []
         mock_agent = AsyncMock()
-        mock_agent.run = AsyncMock(side_effect=_run)
+        mock_agent.run = AsyncMock(return_value=mock_agent_result)
 
-        with patch("app.services.agent._get_agent", return_value=mock_agent):
-            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=10)
+        async def _embed(queries):
+            return ([[0.1]] * len(queries), [None] * len(queries), False)
+
+        async def _retrieve_one(query_text, *args, **kwargs):
+            return ([f"doc:{query_text}"], [{}], [0.5])
+
+        from prometheus_client import REGISTRY
+
+        before = REGISTRY.get_sample_value("agent_fallback_total") or 0.0
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch.object(settings, "agent_include_raw_query", True),
+            patch("app.services.agent.embed_dense_and_sparse", new=AsyncMock(side_effect=_embed)),
+            patch(
+                "app.services.agent.retrieve_one_query", new=AsyncMock(side_effect=_retrieve_one)
+            ),
+        ):
+            request = SearchRequest(queries=["SEED"], collection_names=["coll1"], k=5)
             result = await agentic_search(request)
 
-        assert "doc1" in result.documents[0]
-        assert "doc2" in result.documents[0]
+        assert REGISTRY.get_sample_value("agent_fallback_total") == before + 1
+        assert set(result.documents[0]) == {"doc:SEED", "doc:fb q"}
+
+    async def test_timeout_covers_seed_and_agent(self):
+        """AGENT_TIMEOUT is one budget for the raw-query seed plus the agent run."""
+
+        async def _slow_retrieve_all(*args, **kwargs):
+            await asyncio.sleep(0.6)
+            return [RetrievalResult(texts=["seed"], metadatas=[{}], distances=[0.9])]
+
+        async def _slow_run(*args, **kwargs):
+            await asyncio.sleep(0.6)
+
+        mock_agent = AsyncMock()
+        mock_agent.run = AsyncMock(side_effect=_slow_run)
+
+        from prometheus_client import REGISTRY
+
+        before = REGISTRY.get_sample_value("agent_timeouts_total") or 0.0
+        with (
+            patch("app.services.agent._get_agent", return_value=mock_agent),
+            patch.object(settings, "agent_include_raw_query", True),
+            patch.object(settings, "agent_timeout", 1),
+            patch.object(agent_module, "_retrieve_all", new=_slow_retrieve_all),
+        ):
+            start = time.monotonic()
+            request = SearchRequest(queries=["hello"], collection_names=["coll1"], k=5)
+            result = await agentic_search(request)
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 1.5
+        assert REGISTRY.get_sample_value("agent_timeouts_total") == before + 1
+        assert result.documents == [["seed"]]
 
 
 class TestAgentMaxIterations:
@@ -382,6 +438,7 @@ class TestAgentRetryObservability:
         ]
 
         async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.tool_called = True
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
@@ -414,6 +471,7 @@ class TestAgentRetryObservability:
         ]
 
         async def _run(prompt, *, deps: AgentDeps, **kwargs):
+            deps.tool_called = True
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"
@@ -572,6 +630,7 @@ class TestAgentRecallDecoupling:
 
         async def _run(prompt, *, deps: AgentDeps, **kwargs):
             captured_deps.append(deps)
+            deps.tool_called = True
             deps.full_results = [RetrievalResult(texts=["doc"], metadatas=[{}], distances=[0.9])]
             mock_result = MagicMock()
             mock_result.output = "done"

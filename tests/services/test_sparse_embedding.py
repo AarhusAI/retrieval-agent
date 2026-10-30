@@ -30,7 +30,7 @@ async def test_fastembed_returns_sparse_vectors():
     fake_b.values = np.array([0.7, 0.1])
 
     fake_model = MagicMock()
-    fake_model.embed.return_value = iter([fake_a, fake_b])
+    fake_model.query_embed.return_value = iter([fake_a, fake_b])
 
     with (
         patch("app.services.sparse_embedding.settings") as mock_settings,

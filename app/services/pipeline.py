@@ -130,7 +130,9 @@ async def retrieve_one_query(
 
     if settings.enable_reranking and texts and rerank_k is not None:
         async with metrics.time_stage("rerank"):
-            texts, metadatas, distances = await rerank(query_text, texts, metadatas, rerank_k)
+            texts, metadatas, distances = await rerank(
+                query_text, texts, metadatas, distances, rerank_k
+            )
 
     return texts, metadatas, distances
 

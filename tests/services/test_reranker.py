@@ -30,6 +30,7 @@ async def test_rerank_basic_replace_mode():
             "query",
             ["doc_low", "doc_high"],
             [{"id": 1}, {"id": 2}],
+            [0.9, 0.8],
             k=2,
         )
 
@@ -76,7 +77,7 @@ async def test_rerank_rrf_surfaces_buried_dense_hit():
             return_value=_diagnostic_response(),
         ),
     ):
-        texts, _metas, _scores = await rerank("query", _DIAG_DOCS, _DIAG_METAS, k=3)
+        texts, _metas, _scores = await rerank("query", _DIAG_DOCS, _DIAG_METAS, [0.9] * 4, k=3)
 
     # Fused order (K=60): A (#0), bankopl (#2), C — bankopl is inside top-3.
     assert "bankopl" in texts
@@ -94,7 +95,7 @@ async def test_rerank_replace_mode_buries_dense_hit():
             return_value=_diagnostic_response(),
         ),
     ):
-        texts, _metas, _scores = await rerank("query", _DIAG_DOCS, _DIAG_METAS, k=3)
+        texts, _metas, _scores = await rerank("query", _DIAG_DOCS, _DIAG_METAS, [0.9] * 4, k=3)
 
     assert "bankopl" not in texts
     assert texts == ["A", "B", "C"]
@@ -119,6 +120,7 @@ async def test_rerank_limits_to_k():
             "query",
             ["a", "b", "c"],
             [{}, {}, {}],
+            [0.9, 0.8, 0.7],
             k=2,
         )
 
@@ -127,7 +129,7 @@ async def test_rerank_limits_to_k():
 
 
 async def test_rerank_empty_documents():
-    texts, metas, scores = await rerank("query", [], [], k=5)
+    texts, metas, scores = await rerank("query", [], [], [], k=5)
     assert texts == []
     assert metas == []
     assert scores == []
@@ -147,13 +149,14 @@ async def test_rerank_http_error_falls_back_to_unranked():
             "query",
             ["doc1", "doc2", "doc3"],
             [{"id": 1}, {"id": 2}, {"id": 3}],
+            [0.9, 0.8, 0.7],
             k=2,
         )
 
     # Should return first k documents unranked
     assert texts == ["doc1", "doc2"]
     assert metas == [{"id": 1}, {"id": 2}]
-    assert scores == [0.0, 0.0]
+    assert scores == [0.9, 0.8]
 
 
 async def test_rerank_connect_error_falls_back_to_unranked():
@@ -168,12 +171,13 @@ async def test_rerank_connect_error_falls_back_to_unranked():
             "query",
             ["doc1", "doc2"],
             [{"id": 1}, {"id": 2}],
+            [0.9, 0.8],
             k=5,
         )
 
     assert texts == ["doc1", "doc2"]
     assert metas == [{"id": 1}, {"id": 2}]
-    assert scores == [0.0, 0.0]
+    assert scores == [0.9, 0.8]
 
 
 async def test_rerank_timeout_falls_back_to_unranked():
@@ -188,11 +192,12 @@ async def test_rerank_timeout_falls_back_to_unranked():
             "query",
             ["doc1", "doc2"],
             [{"id": 1}, {"id": 2}],
+            [0.9, 0.8],
             k=5,
         )
 
     assert texts == ["doc1", "doc2"]
-    assert scores == [0.0, 0.0]
+    assert scores == [0.9, 0.8]
 
 
 async def test_rerank_malformed_response_falls_back_to_unranked():
@@ -209,11 +214,12 @@ async def test_rerank_malformed_response_falls_back_to_unranked():
             "query",
             ["doc1", "doc2"],
             [{"id": 1}, {"id": 2}],
+            [0.9, 0.8],
             k=5,
         )
 
     assert texts == ["doc1", "doc2"]
-    assert scores == [0.0, 0.0]
+    assert scores == [0.9, 0.8]
 
 
 async def test_rerank_score_count_mismatch_falls_back_to_unranked():
@@ -230,11 +236,12 @@ async def test_rerank_score_count_mismatch_falls_back_to_unranked():
             "query",
             ["doc1", "doc2", "doc3"],
             [{}, {}, {}],
+            [0.9, 0.8, 0.7],
             k=3,
         )
 
     assert texts == ["doc1", "doc2", "doc3"]
-    assert scores == [0.0, 0.0, 0.0]
+    assert scores == [0.9, 0.8, 0.7]
 
 
 async def test_rerank_failure_increments_failure_counter():
@@ -248,6 +255,6 @@ async def test_rerank_failure_increments_failure_counter():
         new_callable=AsyncMock,
         side_effect=httpx.ConnectError("Connection refused"),
     ):
-        await rerank("query", ["doc1"], [{"id": 1}], k=5)
+        await rerank("query", ["doc1"], [{"id": 1}], [0.9], k=5)
     after = REGISTRY.get_sample_value("reranker_failures_total")
     assert after == before + 1
