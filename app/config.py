@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # Hybrid search. When enabled, retrieval uses native Qdrant hybrid (Query API
     # with prefetch + RRF fusion) for collections that carry sparse vectors, and
     # falls back to client-side BM25 RRF for collections that don't.
-    enable_hybrid_search: bool = False
+    enable_hybrid_search: bool = True
     hybrid_bm25_weight: float = 0.3
     bm25_cache_ttl_seconds: int = 300
     # Hard cap on documents pulled into the in-memory BM25 index per

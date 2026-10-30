@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ### Changed
 
+- `ENABLE_HYBRID_SEARCH` now defaults to `true` (was `false`), matching the ingestion service (which now writes
+  `text-sparse` by default) and the parent stack. Collections without `text-sparse` fall back to client-side BM25,
+  which scrolls the whole scope — set `ENABLE_HYBRID_SEARCH=false` for large dense-only collections. With `text-sparse`
+  present, startup now preloads the ~80 MB BM42 sparse model by default (downloaded on first boot).
 - `RERANK_FUSION` (`rrf`|`replace`) and `SPARSE_QUERY_PROVIDER` (`fastembed`|`none`) are validated at startup; a typo
   no longer silently selects the other branch. `SPARSE_QUERY_PROVIDER` is now case-sensitive.
 - `LOG_FORMAT` (`text`|`json`) is validated the same way and is now case-sensitive.

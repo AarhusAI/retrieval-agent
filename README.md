@@ -174,7 +174,7 @@ comments and example prompt overrides. Invalid values (weak `API_KEY`, empty `EM
 | `EMBEDDING_API_BASE_URL`                     | *(required)*                              | OpenAI-compatible embedding endpoint **including** `/v1` (`/embeddings` is appended)                              |
 | `EMBEDDING_API_KEY`                          | *(required by compose)*                   | API key for embedding endpoint                                                                                    |
 | `EMBEDDING_PREFIX_QUERY`                     | `"query: "`                               | Query-side prefix; must match ingestion (`"query: "` for e5, empty for bge-m3). Quote to keep the space           |
-| `ENABLE_HYBRID_SEARCH`                       | `false`                                   | Hybrid retrieval — native sparse+dense when the collection has `text-sparse`, else client-side BM25               |
+| `ENABLE_HYBRID_SEARCH`                       | `true`                                    | Hybrid retrieval — native sparse+dense when the collection has `text-sparse`, else client-side BM25               |
 | `HYBRID_BM25_WEIGHT`                         | `0.3`                                     | BM25 weight in the client-side BM25 fusion (vector weight = 1 − this; unused on the native path)                  |
 | `BM25_CACHE_TTL_SECONDS`                     | `300`                                     | TTL for the client-side BM25 index cache (BM25 fallback path only)                                                |
 | `BM25_MAX_DOCS`                              | `10000`                                   | Max documents scrolled into the in-memory BM25 index per collection scope (OOM guard)                             |
