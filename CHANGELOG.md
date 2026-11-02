@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ### Fixed
 
+- Sparse (BM42) query vectors now use fastembed's `query_embed` instead of the document-side `embed`, as the IDF-weighted
+  `text-sparse` index expects.
+- `vector_search` only treats a 404 (collection not found) as "no results"; other Qdrant errors (e.g. vector dimension
+  mismatch) now surface as 500s instead of silently returning empty.
+- When the reranker fails, results keep their retrieval scores instead of `0.0`.
+- Agentic retries replace the previous agent round instead of accumulating every round; the raw-query seed is kept.
+- The no-tool-call fallback now also runs when the raw-query seed is enabled, and appends to the seed.
+- `AGENT_TIMEOUT` now covers the raw-query seed as well as the agent run.
+- Queries are cut to `EMBEDDING_MAX_QUERY_CHARS` (default `1500`) before dense embedding; the endpoint rejected long
+  chat messages with 400.
+- `.claude/settings.local.json` is no longer tracked.
 - `AGENT_MAX_ITERATIONS` is now enforced as a PydanticAI request limit (iterations + 1) instead of only being stated in
   the system prompt; hitting it returns the partial results gathered so far.
 - `BM25_MAX_DOCS`, `RERANK_FUSION`, `RERANK_RRF_K` and `AGENT_INCLUDE_RAW_QUERY` are passed through `docker-compose.yml`

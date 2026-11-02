@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     embedding_api_base_url: str = ""
     embedding_api_key: str = ""
     embedding_prefix_query: str = "query: "
+    # Queries are cut to this many characters before dense embedding; the
+    # endpoint rejects input over the model's 512-token limit (~3000 chars of
+    # Danish fails, 2000 passes).
+    embedding_max_query_chars: int = 1500
 
     @field_validator("embedding_api_base_url")
     @classmethod

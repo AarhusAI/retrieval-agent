@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from qdrant_client import models
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -90,6 +91,24 @@ async def test_vector_search_connection_error_propagates():
         patch("app.services.qdrant.get_client", return_value=mock_client),
         patch("app.services.qdrant.has_sparse_vectors", return_value=False),
         pytest.raises(ConnectionError),
+    ):
+        await vector_search(["file-abc"], [0.1], None, k=5)
+
+
+async def test_vector_search_bad_request_propagates():
+    """Non-404 errors (e.g. vector dimension mismatch) must not look like 'no results'."""
+    mock_client = MagicMock()
+    mock_client.query_points.side_effect = UnexpectedResponse(
+        status_code=400,
+        content=b"Bad request",
+        reason_phrase="Bad Request",
+        headers=httpx.Headers(),
+    )
+
+    with (
+        patch("app.services.qdrant.get_client", return_value=mock_client),
+        patch("app.services.qdrant.has_sparse_vectors", return_value=False),
+        pytest.raises(UnexpectedResponse),
     ):
         await vector_search(["file-abc"], [0.1], None, k=5)
 

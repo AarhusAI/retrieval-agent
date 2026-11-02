@@ -153,7 +153,12 @@ Each top-level list element corresponds to one query. `distances` always means *
 
 - dense-only retrieval — cosine similarity normalized to `[0, 1]`
 - native hybrid (sparse vectors present) — raw Qdrant RRF scores (small positive values, typically `< 0.04`)
-- reranking enabled — the cross-encoder's relevance score
+- client-side BM25 fallback (hybrid on, no `text-sparse`) — weighted RRF scores (`HYBRID_BM25_WEIGHT`), small
+  positive values
+- reranking enabled — the cross-encoder's relevance score; if the reranker fails, the retrieval score of whichever
+  path ran
+
+The collection names in `collection_names` are trusted as given: any API-key holder can query any collection.
 
 ⚠️ If Open WebUI applies a relevance-score threshold to these values, tune it per configuration — a threshold
 calibrated for cosine scores (e.g. `0.5`) silently drops *every* result on the RRF scale.
@@ -174,6 +179,7 @@ comments and example prompt overrides. Invalid values (weak `API_KEY`, empty `EM
 | `EMBEDDING_API_BASE_URL`                     | *(required)*                              | OpenAI-compatible embedding endpoint **including** `/v1` (`/embeddings` is appended)                              |
 | `EMBEDDING_API_KEY`                          | *(required by compose)*                   | API key for embedding endpoint                                                                                    |
 | `EMBEDDING_PREFIX_QUERY`                     | `"query: "`                               | Query-side prefix; must match ingestion (`"query: "` for e5, empty for bge-m3). Quote to keep the space           |
+| `EMBEDDING_MAX_QUERY_CHARS`                  | `1500`                                    | Queries are cut to this many characters before dense embedding (the endpoint rejects input past ~512 tokens)      |
 | `ENABLE_HYBRID_SEARCH`                       | `true`                                    | Hybrid retrieval — native sparse+dense when the collection has `text-sparse`, else client-side BM25               |
 | `HYBRID_BM25_WEIGHT`                         | `0.3`                                     | BM25 weight in the client-side BM25 fusion (vector weight = 1 − this; unused on the native path)                  |
 | `BM25_CACHE_TTL_SECONDS`                     | `300`                                     | TTL for the client-side BM25 index cache (BM25 fallback path only)                                                |
@@ -196,7 +202,7 @@ comments and example prompt overrides. Invalid values (weak `API_KEY`, empty `EM
 | `AGENT_MAX_ITERATIONS`                       | `3`                                       | Max retrieve rounds; enforced as an LLM request limit (rounds + 1), returns partial results when hit              |
 | `AGENT_TOOL_PREVIEW_CHARS`                   | `200`                                     | Max chars of document text sent to the agent for grading (full text kept side-channel)                            |
 | `AGENT_STRICT_TOOLS`                         | `true`                                    | Strict tool schemas; disable for models that don't support them                                                   |
-| `AGENT_TIMEOUT`                              | `60`                                      | Wall-clock timeout (seconds) for the agent run, also the per-LLM-call HTTP timeout; partial results on timeout    |
+| `AGENT_TIMEOUT`                              | `60`                                      | Wall-clock timeout (s) for raw-query seed + agent run, also per-LLM-call HTTP timeout; partial results on timeout |
 | `AGENT_SYSTEM_PROMPT`                        |                                           | Override the built-in agent system prompt (used when empty)                                                       |
 | `AGENT_FETCH_K`                              | `20`                                      | Per-query candidate pool in agentic mode; decoupled from `request.k` so a small `top_k` doesn't starve grading    |
 | `AGENT_PREVIEW_K`                            | `5`                                       | Max previews returned to the agent per `retrieve` call (caps context-window growth)                               |
@@ -293,7 +299,8 @@ the results are completely off-topic.
    prompt so it can resolve conversational references ("the one you mentioned").
 2. **Retrieve tool** — the same pipeline helpers (`embed_dense_and_sparse`, `retrieve_one_query`) used by linear
    mode. Hybrid + rerank branches are identical; the agent path just feeds them through a side-channel.
-3. **Side-channel** — `AgentDeps.full_results` accumulates the *full* `RetrievalResult` lists across iterations.
+3. **Side-channel** — `AgentDeps.full_results` holds the *full* `RetrievalResult` lists: the raw-query seed plus the
+   latest `retrieve` round (a retry replaces the previous round; the seed is kept).
    The tool only returns truncated previews (`AGENT_PREVIEW_K` items, `AGENT_TOOL_PREVIEW_CHARS` per item) to the
    LLM, so the agent's context window doesn't balloon across retries.
 4. **Fallback** — if the agent emits queries as text instead of calling the tool, `_parse_fallback_queries` extracts

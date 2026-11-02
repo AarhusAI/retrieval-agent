@@ -50,6 +50,10 @@ class AgentDeps:
     fetch_k: int
     # Side-channel: full results stored here, truncated previews sent to LLM
     full_results: list[RetrievalResult] | None = None
+    # Number of leading full_results entries that came from the raw-query seed.
+    seed_count: int = 0
+    # Set by the retrieve tool; the no-tool-call fallback only runs when False.
+    tool_called: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -176,18 +180,19 @@ async def _run_retrieve(deps: AgentDeps, queries: list[str]) -> list[RetrievalRe
     log.info("Agent tool 'retrieve' called with %d queries", len(queries))
     log.debug("Agent tool 'retrieve' queries: %s", sanitize_for_log(queries))
 
+    deps.tool_called = True
     if not queries:
         # The system prompt tells the model to call retrieve([]) when no
-        # retrieval is needed (greetings, small talk). Mark full_results so
-        # the no-tool-call fallback doesn't fire, and skip the embedding
-        # round-trip — OpenAI-compatible APIs reject an empty input list.
-        deps.full_results = deps.full_results or []
+        # retrieval is needed (greetings, small talk). tool_called stops the
+        # no-tool-call fallback; skip the embedding round-trip — OpenAI-
+        # compatible APIs reject an empty input list.
         return []
 
     all_results = await _retrieve_all(queries, deps.collection_names, deps.fetch_k, deps.k)
 
-    # Accumulate full results across retries (dedup happens downstream)
-    deps.full_results = (deps.full_results or []) + all_results
+    # Keep the raw-query seed; a new round replaces earlier agent rounds — the
+    # agent only retries when it judged the previous round off-topic.
+    deps.full_results = (deps.full_results or [])[: deps.seed_count] + all_results
 
     return _build_previews(
         all_results,
@@ -300,11 +305,12 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     retries with rewritten queries when results are completely off-topic.
     Bounded by ``AGENT_MAX_ITERATIONS`` and ``AGENT_TIMEOUT`` (wall-clock).
 
-    Full retrieval results accumulate on ``AgentDeps.full_results`` across
-    iterations; only truncated previews go back to the LLM. On timeout, or
-    when the agent emits queries as text instead of calling the tool, the
-    fallback path performs a direct vector search using
-    :func:`_parse_fallback_queries` to recover the queries.
+    Only truncated previews go back to the LLM; full results live on
+    ``AgentDeps.full_results``: the raw-query seed followed by the latest
+    retrieve round (a retry replaces the previous round). ``AGENT_TIMEOUT``
+    covers seed + agent run. When the agent emits queries as text instead of
+    calling the tool, the fallback path performs a direct vector search using
+    :func:`_parse_fallback_queries` and appends to the seed.
     """
     queries = request.queries
     if not queries and request.messages:
@@ -325,26 +331,6 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         k=k,
         fetch_k=fetch_k,
     )
-
-    # Always search the user's original query, independent of how the agent
-    # rewrites it; the agent's own retrievals append to this seed and the lot
-    # is merged by interleave_dedup. Guards recall against query-rewrite drift
-    # (e.g. reformulations that match boilerplate instead of content). Failures
-    # are swallowed — this is a recall safety-net, not a hard dependency.
-    if settings.agent_include_raw_query:
-        try:
-            seeded = await _retrieve_all(queries, deps.collection_names, fetch_k, k)
-        except Exception:
-            log.exception("Raw-query seed retrieval failed; continuing with agent-only results")
-            seeded = []
-        if seeded:
-            deps.full_results = seeded
-            if log.isEnabledFor(logging.DEBUG):
-                log.debug(
-                    "Seeded %d raw-query result set(s) before agent loop: %s",
-                    len(seeded),
-                    [_source_score_pairs(r.metadatas, r.distances) for r in seeded],
-                )
 
     if request.messages:
         recent = request.messages[-settings.agent_conversation_history_messages :]
@@ -379,17 +365,38 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
     log.debug("Agentic search queries: %s", sanitize_for_log(queries))
 
     try:
-        async with metrics.time_stage("agent_loop"):
-            result = await asyncio.wait_for(
-                agent.run(
+        # One wall-clock budget for seed + agent run.
+        async with asyncio.timeout(settings.agent_timeout):
+            # Always search the user's original query, independent of how the
+            # agent rewrites it; merged with the agent's retrievals by
+            # interleave_dedup. Guards recall against query-rewrite drift.
+            # Failures are swallowed — a recall safety-net, not a hard dependency.
+            if settings.agent_include_raw_query:
+                try:
+                    seeded = await _retrieve_all(queries, deps.collection_names, fetch_k, k)
+                except Exception:
+                    log.exception(
+                        "Raw-query seed retrieval failed; continuing with agent-only results"
+                    )
+                    seeded = []
+                if seeded:
+                    deps.full_results = seeded
+                    deps.seed_count = len(seeded)
+                    if log.isEnabledFor(logging.DEBUG):
+                        log.debug(
+                            "Seeded %d raw-query result set(s) before agent loop: %s",
+                            len(seeded),
+                            [_source_score_pairs(r.metadatas, r.distances) for r in seeded],
+                        )
+
+            async with metrics.time_stage("agent_loop"):
+                result = await agent.run(
                     user_prompt,
                     deps=deps,
                     model_settings={"temperature": 0},
                     # One LLM request per retrieve round, plus the final answer.
                     usage_limits=UsageLimits(request_limit=settings.agent_max_iterations + 1),
-                ),
-                timeout=settings.agent_timeout,
-            )
+                )
     except TimeoutError:
         metrics.agent_timeouts_total.inc()
         log.warning("Agent timed out after %ds, returning partial results", settings.agent_timeout)
@@ -402,7 +409,7 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         return _respond(deps.full_results or [], k, " (max iterations)")
 
     # Fallback: if agent didn't call retrieve, do direct search
-    if deps.full_results is None:
+    if not deps.tool_called:
         metrics.agent_fallback_total.inc()
         log.warning("Agent did not call retrieve tool — falling back to direct search.")
         log.debug(
@@ -412,12 +419,11 @@ async def agentic_search(request: SearchRequest) -> SearchResponse:
         try:
             fallback_queries = _parse_fallback_queries(result.output) or queries
             # rerank_k=None — fallback intentionally returns raw vector results.
-            deps.full_results = await _retrieve_all(
+            deps.full_results = (deps.full_results or []) + await _retrieve_all(
                 fallback_queries, request.collection_names, fetch_k, None
             )
         except Exception:
             log.exception("Agent fallback direct search failed")
-            deps.full_results = []
 
     retrieval_results = deps.full_results or []
     run_usage = result.usage
