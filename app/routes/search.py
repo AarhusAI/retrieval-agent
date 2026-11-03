@@ -12,11 +12,8 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.post("/search", response_model=SearchResponse)
-async def search_endpoint(
-    request: SearchRequest,
-    _api_key: str = Depends(verify_api_key),
-) -> SearchResponse:
+@router.post("/search", response_model=SearchResponse, dependencies=[Depends(verify_api_key)])
+async def search_endpoint(request: SearchRequest) -> SearchResponse:
     log.info(
         "Search request: queries=%d, messages=%d, collections=%s, k=%d",
         len(request.queries) if request.queries else 0,

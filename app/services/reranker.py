@@ -13,6 +13,7 @@ async def rerank(
     query: str,
     documents: list[str],
     metadatas: list[dict],
+    distances: list[float],
     k: int,
 ) -> tuple[list[str], list[dict], list[float]]:
     """
@@ -24,9 +25,9 @@ async def rerank(
     the retrieval ranking and the cross-encoder ranking — so a strong dense hit the
     cross-encoder underranks isn't buried. ``replace`` restores cross-encoder-only
     ordering. Either way the returned score is the cross-encoder relevance score
-    (only the ordering changes), limited to k. Falls back to unranked results
-    (truncated to k) on any HTTP/transport error (including timeouts) or a
-    malformed response body.
+    (only the ordering changes), limited to k. Falls back to retrieval order and
+    retrieval scores (truncated to k) on any HTTP/transport error (including
+    timeouts) or a malformed response body.
     """
     if not documents:
         return [], [], []
@@ -56,9 +57,10 @@ async def rerank(
         # the rest classify a malformed response body. Either way: fail open.
         metrics.reranker_failures_total.inc()
         log.warning("Reranker request failed (%s), returning unranked results", exc)
-        return documents[:k], metadatas[:k], [0.0] * min(len(documents), k)
+        return documents[:k], metadatas[:k], distances[:k]
 
     n = len(documents)
+    rerank_order = sorted(range(n), key=lambda i: scores[i], reverse=True)
 
     if settings.rerank_fusion == "rrf":
         # Reciprocal Rank Fusion: input index = retrieval rank, cross-encoder
@@ -66,7 +68,6 @@ async def rerank(
         # burying a strong dense/hybrid hit it happens to underrank. Stable sort
         # ⇒ retrieval order breaks fused-score ties.
         rf = settings.rerank_rrf_k
-        rerank_order = sorted(range(n), key=lambda i: scores[i], reverse=True)
         rerank_rank = {idx: pos for pos, idx in enumerate(rerank_order)}
         order = sorted(
             range(n),
@@ -74,7 +75,7 @@ async def rerank(
             reverse=True,
         )[:k]
     else:  # "replace" — cross-encoder score only (older behaviour)
-        order = sorted(range(n), key=lambda i: scores[i], reverse=True)[:k]
+        order = rerank_order[:k]
 
     # Return the cross-encoder relevance score (meaning unchanged downstream);
     # only the ordering reflects the fusion.

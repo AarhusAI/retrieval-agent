@@ -32,7 +32,7 @@ _model: SparseTextEmbedding | None = None
 
 def get_model() -> SparseTextEmbedding | None:
     """Lazy-load the fastembed sparse model. ``None`` when the provider is disabled."""
-    if settings.sparse_query_provider.lower() == "none":
+    if settings.sparse_query_provider == "none":
         return None
 
     global _model
@@ -58,12 +58,12 @@ async def embed_queries(queries: list[str]) -> list[SparseVector | None]:
     active, or ``None`` when sparse is disabled. The downstream caller treats
     ``None`` as "no sparse vector available, use dense-only".
 
-    fastembed is synchronous; the embedding work runs in a worker thread so it
+    fastembed is synchronous; the query embedding runs in a worker thread so it
     doesn't block the FastAPI event loop.
     """
     model = get_model()
     if model is None:
         return [None] * len(queries)
 
-    raw = await asyncio.to_thread(lambda: list(model.embed(queries)))
+    raw = await asyncio.to_thread(lambda: list(model.query_embed(queries)))
     return [SparseVector(indices=e.indices.tolist(), values=e.values.tolist()) for e in raw]

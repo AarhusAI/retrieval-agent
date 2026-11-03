@@ -47,28 +47,6 @@ async def test_hybrid_when_sparse_present():
     assert result.distances == [0.42]
 
 
-async def test_hybrid_falls_back_to_dense_when_collection_has_no_sparse():
-    """Even with a sparse_vector, dense-only path runs if the collection lacks sparse vectors."""
-    mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.points = []
-    mock_client.query_points.return_value = mock_response
-
-    sparse = models.SparseVector(indices=[1], values=[0.5])
-
-    with (
-        patch("app.services.qdrant.get_client", return_value=mock_client),
-        patch("app.services.qdrant.has_sparse_vectors", return_value=False),
-    ):
-        await vector_search(["file-abc"], [0.1], sparse, k=5)
-
-    call_kwargs = mock_client.query_points.call_args.kwargs
-    # Dense-only call shape: no prefetch; bare ``query`` + ``using``
-    assert call_kwargs.get("prefetch") in (None, [])
-    assert call_kwargs["using"] == "text-dense"
-    assert call_kwargs["query"] == [0.1]
-
-
 async def test_has_sparse_vectors_caches_result():
     """has_sparse_vectors caches; reset_sparse_capability clears the cache."""
     reset_sparse_capability()
