@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog], and this project adheres to [Semantic
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-11-03
+
 ### Fixed
 
 - Sparse (BM42) query vectors now use fastembed's `query_embed` instead of the document-side `embed`, as the IDF-weighted
